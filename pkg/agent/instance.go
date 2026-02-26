@@ -59,6 +59,8 @@ func NewAgentInstance(
 	sessionsManager := session.NewSessionManager(sessionsDir)
 
 	contextBuilder := NewContextBuilder(workspace)
+	contextBuilder.SetToolsRegistry(toolsRegistry)
+	contextBuilder.SetSelfImproveConfig(&cfg.Tools.SelfImprove)
 
 	agentID := routing.DefaultAgentID
 	agentName := ""

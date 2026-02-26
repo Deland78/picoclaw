@@ -11,15 +11,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sipeed/picoclaw/pkg/config"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
+	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 type ContextBuilder struct {
 	workspace    string
 	skillsLoader *skills.SkillsLoader
 	memory       *MemoryStore
+	tools        *tools.ToolRegistry // Direct reference to tool registry
+	selfImprove  *config.SelfImproveConfig
 
 	// Cache for system prompt to avoid rebuilding on every call.
 	// This fixes issue #607: repeated reprocessing of the entire context.
@@ -55,6 +59,17 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		skillsLoader: skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
 		memory:       NewMemoryStore(workspace),
 	}
+}
+
+// SetToolsRegistry sets the tools registry for dynamic tool summary generation.
+func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
+	cb.tools = registry
+}
+
+
+// SetSelfImproveConfig sets the self-improvement config for learnings status injection.
+func (cb *ContextBuilder) SetSelfImproveConfig(cfg *config.SelfImproveConfig) {
+	cb.selfImprove = cfg
 }
 
 func (cb *ContextBuilder) getIdentity() string {
@@ -102,6 +117,12 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the read_file tool.
 
 %s`, skillsSummary))
+	}
+
+	// Self-improvement learnings status
+	learningsStatus := cb.buildLearningsStatus()
+	if learningsStatus != "" {
+		parts = append(parts, "# Self-Improvement\n\n"+learningsStatus)
 	}
 
 	// Memory context

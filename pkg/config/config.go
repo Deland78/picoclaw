@@ -468,11 +468,20 @@ type ExecConfig struct {
 	CustomDenyPatterns []string `json:"custom_deny_patterns" env:"PICOCLAW_TOOLS_EXEC_CUSTOM_DENY_PATTERNS"`
 }
 
+type SelfImproveConfig struct {
+	Enabled            bool   `json:"enabled"             env:"PICOCLAW_TOOLS_SELF_IMPROVE_ENABLED"`
+	Mode               string `json:"mode"                env:"PICOCLAW_TOOLS_SELF_IMPROVE_MODE"`                // log, promote
+	LogDir             string `json:"log_dir"             env:"PICOCLAW_TOOLS_SELF_IMPROVE_LOG_DIR"`             // relative to workspace
+	PromotionThreshold int    `json:"promotion_threshold" env:"PICOCLAW_TOOLS_SELF_IMPROVE_PROMOTION_THRESHOLD"` // recurrence count before auto-promote
+}
+
+
 type ToolsConfig struct {
 	Web    WebToolsConfig    `json:"web"`
 	Cron   CronToolsConfig   `json:"cron"`
 	Exec   ExecConfig        `json:"exec"`
-	Skills SkillsToolsConfig `json:"skills"`
+	Skills      SkillsToolsConfig `json:"skills"`
+	SelfImprove SelfImproveConfig `json:"self_improve"`
 }
 
 type SkillsToolsConfig struct {

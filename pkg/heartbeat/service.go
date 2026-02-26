@@ -273,6 +273,15 @@ This file contains tasks for the heartbeat service to check periodically.
 ---
 
 Add your heartbeat tasks below this line:
+
+## Self-Improvement Review
+
+Review .learnings/ files for entries that should be promoted or resolved:
+1. Read .learnings/LEARNINGS.md and .learnings/ERRORS.md
+2. Check for pending entries with high priority or 3+ related entries
+3. Promote proven patterns to memory/MEMORY.md, AGENT.md, or SOUL.md
+4. Mark stale entries (older than 30 days with no recurrence) as wont_fix
+5. If no pending learnings need attention, skip silently
 `
 
 	if err := os.WriteFile(heartbeatPath, []byte(defaultContent), 0o644); err != nil {

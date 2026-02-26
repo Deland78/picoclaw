@@ -167,6 +167,11 @@ func gatewayCmd(debug bool) error {
 	}
 	fmt.Println("✓ Cron service started")
 
+	// Seed self-improvement review cron job if enabled
+	if cfg.Tools.SelfImprove.Enabled {
+		seedSelfImproveCron(cronService)
+	}
+
 	if err := heartbeatService.Start(); err != nil {
 		fmt.Printf("Error starting heartbeat service: %v\n", err)
 	}

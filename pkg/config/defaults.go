@@ -312,6 +312,12 @@ func DefaultConfig() *Config {
 					TTLSeconds: 300,
 				},
 			},
+			SelfImprove: SelfImproveConfig{
+				Enabled:            true,
+				Mode:               "log",
+				LogDir:             ".learnings",
+				PromotionThreshold: 3,
+			},
 		},
 		Heartbeat: HeartbeatConfig{
 			Enabled:  true,
