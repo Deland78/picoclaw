@@ -14,6 +14,7 @@ import (
 	"github.com/sipeed/picoclaw/cmd/picoclaw/internal"
 	"github.com/sipeed/picoclaw/pkg/agent"
 	"github.com/sipeed/picoclaw/pkg/bus"
+	"github.com/sipeed/picoclaw/pkg/cli"
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
@@ -50,6 +51,12 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	msgBus := bus.NewMessageBus()
 	agentLoop := agent.NewAgentLoop(cfg, msgBus, provider)
 
+	// Set up usage tracking
+	tracker := cli.NewUsageTracker()
+	agentLoop.SetUsageCallback(func(usage *providers.UsageInfo) {
+		tracker.Record(usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+	})
+
 	// Print agent startup info (only for interactive mode)
 	startupInfo := agentLoop.GetStartupInfo()
 	logger.InfoCF("agent", "Agent initialized",
@@ -70,12 +77,12 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	}
 
 	fmt.Printf("%s Interactive mode (Ctrl+C to exit)\n\n", internal.Logo)
-	interactiveMode(agentLoop, sessionKey)
+	interactiveMode(agentLoop, sessionKey, cfg.Agents.Defaults.ModelName, tracker)
 
 	return nil
 }
 
-func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
+func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
 	prompt := fmt.Sprintf("%s You: ", internal.Logo)
 
 	rl, err := readline.NewEx(&readline.Config{
@@ -88,10 +95,12 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 	if err != nil {
 		fmt.Printf("Error initializing readline: %v\n", err)
 		fmt.Println("Falling back to simple input mode...")
-		simpleInteractiveMode(agentLoop, sessionKey)
+		simpleInteractiveMode(agentLoop, sessionKey, model, tracker)
 		return
 	}
 	defer rl.Close()
+
+	spinner := cli.NewSpinner(rl.Stdout())
 
 	for {
 		line, err := rl.Readline()
@@ -114,19 +123,25 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 			return
 		}
 
+		spinner.Start("Thinking...")
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
+		spinner.Stop()
+
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("\n%s %s\n\n", internal.Logo, response)
+		fmt.Fprintf(rl.Stdout(), "\n%s %s\n", internal.Logo, response)
+		fmt.Fprintf(rl.Stdout(), "%s\n\n", tracker.FormatStatusLine(model))
 	}
 }
 
-func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
+func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
 	reader := bufio.NewReader(os.Stdin)
+	spinner := cli.NewSpinner(os.Stderr)
+
 	for {
 		fmt.Print(fmt.Sprintf("%s You: ", internal.Logo))
 		line, err := reader.ReadString('\n')
@@ -149,13 +164,17 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey string) {
 			return
 		}
 
+		spinner.Start("Thinking...")
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
+		spinner.Stop()
+
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			continue
 		}
 
-		fmt.Printf("\n%s %s\n\n", internal.Logo, response)
+		fmt.Printf("\n%s %s\n", internal.Logo, response)
+		fmt.Printf("\033[90m%s\033[0m\n\n", tracker.FormatStatusLine(model))
 	}
 }

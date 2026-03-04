@@ -20,7 +20,7 @@ defaults:
       overnight: ["00:00-06:00"]
 
 mail:
-  provider: "microsoft_graph"
+  provider: "gmail"
   folders:
     quarantine: "Quarantine"
     action_required: "ActionRequired"

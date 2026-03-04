@@ -38,6 +38,12 @@ type AgentLoop struct {
 	summarizing    sync.Map
 	fallback       *providers.FallbackChain
 	channelManager *channels.Manager
+	onUsage        func(usage *providers.UsageInfo)
+}
+
+// SetUsageCallback registers a function called after each successful LLM response with usage data.
+func (al *AgentLoop) SetUsageCallback(fn func(usage *providers.UsageInfo)) {
+	al.onUsage = fn
 }
 
 // processOptions configures how a message is processed
@@ -592,6 +598,10 @@ func (al *AgentLoop) runLLMIteration(
 					"error":     err.Error(),
 				})
 			return "", iteration, fmt.Errorf("LLM call failed after retries: %w", err)
+		}
+
+		if response.Usage != nil && al.onUsage != nil {
+			al.onUsage(response.Usage)
 		}
 
 		// Check if no tool calls - we're done
