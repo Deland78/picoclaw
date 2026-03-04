@@ -100,6 +100,16 @@ func CreateProviderFromConfig(cfg *config.ModelConfig) (LLMProvider, string, err
 		return NewHTTPProviderWithMaxTokensField(cfg.APIKey, apiBase, cfg.Proxy, cfg.MaxTokensField), modelID, nil
 
 	case "anthropic":
+		if cfg.AuthMethod == "claude-code" {
+			cred, err := loadClaudeCodeCreds()
+			if err != nil {
+				return nil, "", fmt.Errorf("loading Claude Code credentials: %w", err)
+			}
+			if cred == nil {
+				return nil, "", fmt.Errorf("not logged in to Claude Code. Run: claude auth login")
+			}
+			return NewClaudeProviderWithTokenSource(cred.AccessToken, createClaudeCodeTokenSource()), modelID, nil
+		}
 		if cfg.AuthMethod == "oauth" || cfg.AuthMethod == "token" {
 			// Use OAuth credentials from auth store
 			provider, err := createClaudeAuthProvider()

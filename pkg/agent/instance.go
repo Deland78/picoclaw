@@ -103,7 +103,7 @@ func NewAgentInstance(
 		MaxIterations:  maxIter,
 		MaxTokens:      maxTokens,
 		Temperature:    temperature,
-		ContextWindow:  maxTokens,
+		ContextWindow:  resolveContextWindow(cfg, model),
 		Provider:       provider,
 		Sessions:       sessionsManager,
 		ContextBuilder: contextBuilder,
@@ -141,6 +141,27 @@ func resolveAgentFallbacks(agentCfg *config.AgentConfig, defaults *config.AgentD
 		return agentCfg.Model.Fallbacks
 	}
 	return defaults.ModelFallbacks
+}
+
+// resolveContextWindow determines the context window size for a model.
+// It checks ModelConfig.ContextWindow first, then falls back to model-name heuristics.
+func resolveContextWindow(cfg *config.Config, model string) int {
+	if cfg != nil {
+		if mc, err := cfg.GetModelConfig(model); err == nil && mc.ContextWindow > 0 {
+			return mc.ContextWindow
+		}
+	}
+	lower := strings.ToLower(model)
+	switch {
+	case strings.Contains(lower, "claude"):
+		return 200000
+	case strings.Contains(lower, "gpt"):
+		return 128000
+	case strings.Contains(lower, "gemini"):
+		return 1000000
+	default:
+		return 128000
+	}
 }
 
 func expandHome(path string) string {

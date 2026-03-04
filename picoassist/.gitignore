@@ -1,0 +1,19 @@
+# Secrets
+.env
+.env.*
+gmail_client_secrets.json
+
+# Runtime data
+profiles/
+data/tokens/
+data/traces/
+data/picoassist.db
+data/runs/
+logs/
+
+# Generated / build
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/

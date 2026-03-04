@@ -15,13 +15,16 @@ import (
 	"github.com/sipeed/picoclaw/pkg/providers"
 )
 
-const supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity"
+const supportedProvidersMsg = "supported providers: openai, anthropic, google-antigravity\n  Use --claude-code with anthropic to use Claude Code's OAuth tokens"
 
-func authLoginCmd(provider string, useDeviceCode bool) error {
+func authLoginCmd(provider string, useDeviceCode, useClaudeCode bool) error {
 	switch provider {
 	case "openai":
 		return authLoginOpenAI(useDeviceCode)
 	case "anthropic":
+		if useClaudeCode {
+			return authLoginClaudeCode()
+		}
 		return authLoginPasteToken(provider)
 	case "google-antigravity", "antigravity":
 		return authLoginGoogleAntigravity()
@@ -257,6 +260,71 @@ func authLoginPasteToken(provider string) error {
 	}
 
 	return nil
+}
+
+func authLoginClaudeCode() error {
+	cred, err := auth.LoadClaudeCodeCredentials()
+	if err != nil {
+		return fmt.Errorf("failed to read Claude Code credentials: %w", err)
+	}
+	if cred == nil {
+		return fmt.Errorf("not logged in to Claude Code. Run 'claude' first to authenticate, then try again")
+	}
+
+	if cred.IsExpired() {
+		return fmt.Errorf("Claude Code token is expired. Run 'claude' to refresh, then try again")
+	}
+
+	// Store a reference credential in PicoClaw's auth store
+	if err = auth.SetCredential("anthropic", cred); err != nil {
+		return fmt.Errorf("failed to save credentials: %w", err)
+	}
+
+	appCfg, err := internal.LoadConfig()
+	defaultModelName := "claude-sonnet-4-6"
+	if err == nil {
+		// Update or add entry in ModelList using claude-cli protocol.
+		// claude-cli spawns `claude -p` as a subprocess — the legitimate way
+		// to use Claude Max. No API key or auth method is needed.
+		found := false
+		for i := range appCfg.ModelList {
+			if isAnthropicModel(appCfg.ModelList[i].Model) || isClaudeCLIModel(appCfg.ModelList[i].Model) {
+				appCfg.ModelList[i].Model = "claude-cli/claude-sonnet-4-6"
+				appCfg.ModelList[i].AuthMethod = ""
+				appCfg.ModelList[i].APIKey = ""
+				appCfg.ModelList[i].APIBase = ""
+				appCfg.ModelList[i].ContextWindow = 200000
+				defaultModelName = appCfg.ModelList[i].ModelName
+				found = true
+				break
+			}
+		}
+		if !found {
+			appCfg.ModelList = append(appCfg.ModelList, config.ModelConfig{
+				ModelName:     defaultModelName,
+				Model:         "claude-cli/claude-sonnet-4-6",
+				ContextWindow: 200000,
+			})
+		}
+
+		// Set default model
+		appCfg.Agents.Defaults.ModelName = defaultModelName
+
+		if err := config.SaveConfig(internal.GetConfigPath(), appCfg); err != nil {
+			fmt.Printf("Warning: could not update config: %v\n", err)
+		}
+	}
+
+	fmt.Println("Claude Code credentials linked successfully!")
+	fmt.Printf("Protocol: claude-cli (spawns `claude -p` subprocess)\n")
+	fmt.Printf("Default model set to: %s\n", defaultModelName)
+
+	return nil
+}
+
+// isClaudeCLIModel checks if a model string uses the claude-cli protocol
+func isClaudeCLIModel(model string) bool {
+	return strings.HasPrefix(model, "claude-cli/")
 }
 
 func authLogoutCmd(provider string) error {

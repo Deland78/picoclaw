@@ -55,6 +55,22 @@ func (p *ClaudeProvider) GetDefaultModel() string {
 	return p.delegate.GetDefaultModel()
 }
 
+func createClaudeCodeTokenSource() func() (string, error) {
+	return func() (string, error) {
+		cred, err := loadClaudeCodeCreds()
+		if err != nil {
+			return "", fmt.Errorf("reading Claude Code credentials: %w", err)
+		}
+		if cred == nil {
+			return "", fmt.Errorf("not logged in to Claude Code. Run: claude auth login")
+		}
+		if cred.IsExpired() {
+			return "", fmt.Errorf("Claude Code token expired. Run claude to refresh")
+		}
+		return cred.AccessToken, nil
+	}
+}
+
 func createClaudeTokenSource() func() (string, error) {
 	return func() (string, error) {
 		cred, err := getCredential("anthropic")

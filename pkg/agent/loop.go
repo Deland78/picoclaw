@@ -723,6 +723,12 @@ func (al *AgentLoop) runLLMIteration(
 			// Save tool result message to session
 			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
 		}
+
+		// Proactive mid-loop compression: if context is growing too large,
+		// drop oldest messages to avoid hitting the context window limit.
+		if al.shouldCompressMidLoop(messages, agent.ContextWindow) {
+			messages = al.compressMidLoop(agent, messages)
+		}
 	}
 
 	return finalContent, iteration, nil
@@ -1024,15 +1030,72 @@ func (al *AgentLoop) summarizeBatch(
 }
 
 // estimateTokens estimates the number of tokens in a message list.
-// Uses a safe heuristic of 2.5 characters per token to account for CJK and other
-// overheads better than the previous 3 chars/token.
+// Counts content, tool call names/IDs/arguments, tool result IDs, and per-message overhead.
+// Uses a heuristic of 2.5 characters per token.
 func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
 	totalChars := 0
 	for _, m := range messages {
 		totalChars += utf8.RuneCountInString(m.Content)
+		totalChars += len(m.ToolCallID)
+		for _, tc := range m.ToolCalls {
+			totalChars += len(tc.Name) + len(tc.ID)
+			if tc.Function != nil {
+				totalChars += len(tc.Function.Arguments)
+			}
+		}
+		totalChars += 10 // per-message overhead (role, framing)
 	}
 	// 2.5 chars per token = totalChars * 2 / 5
 	return totalChars * 2 / 5
+}
+
+// shouldCompressMidLoop returns true when the in-flight messages exceed 60% of the context window.
+func (al *AgentLoop) shouldCompressMidLoop(messages []providers.Message, contextWindow int) bool {
+	if contextWindow <= 0 {
+		return false
+	}
+	return al.estimateTokens(messages) > contextWindow*60/100
+}
+
+// compressMidLoop performs a lightweight drop-oldest compression on the in-flight message slice.
+// It keeps messages[0] (system prompt) and the last 60% of conversation messages,
+// appending a note about dropped messages to the system prompt.
+func (al *AgentLoop) compressMidLoop(agent *AgentInstance, messages []providers.Message) []providers.Message {
+	if len(messages) <= 4 {
+		return messages
+	}
+
+	// messages[0] is the system prompt, messages[1:] is the conversation
+	conversation := messages[1:]
+	keepCount := len(conversation) * 60 / 100
+	if keepCount < 2 {
+		keepCount = 2
+	}
+	dropCount := len(conversation) - keepCount
+
+	if dropCount <= 0 {
+		return messages
+	}
+
+	kept := conversation[dropCount:]
+	systemMsg := messages[0]
+	systemMsg.Content += fmt.Sprintf(
+		"\n\n[System Note: Mid-loop compression dropped %d oldest messages to stay within context window]",
+		dropCount,
+	)
+
+	result := make([]providers.Message, 0, 1+len(kept))
+	result = append(result, systemMsg)
+	result = append(result, kept...)
+
+	logger.WarnCF("agent", "Mid-loop compression executed", map[string]any{
+		"agent_id":      agent.ID,
+		"dropped_msgs":  dropCount,
+		"kept_msgs":     len(kept),
+		"new_total":     len(result),
+	})
+
+	return result
 }
 
 func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) (string, bool) {

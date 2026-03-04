@@ -406,6 +406,7 @@ type ModelConfig struct {
 	// Optional optimizations
 	RPM            int    `json:"rpm,omitempty"`              // Requests per minute limit
 	MaxTokensField string `json:"max_tokens_field,omitempty"` // Field name for max tokens (e.g., "max_completion_tokens")
+	ContextWindow  int    `json:"context_window,omitempty"`   // Model context window in tokens (0 = auto-detect)
 }
 
 // Validate checks if the ModelConfig has all required fields.

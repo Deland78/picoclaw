@@ -292,6 +292,39 @@ func TestCreateProviderReturnsClaudeProviderForAnthropicOAuth(t *testing.T) {
 	// TODO: Test custom APIBase when createClaudeAuthProvider supports it
 }
 
+func TestCreateProviderReturnsClaudeProviderForClaudeCode(t *testing.T) {
+	originalLoadClaudeCodeCreds := loadClaudeCodeCreds
+	t.Cleanup(func() { loadClaudeCodeCreds = originalLoadClaudeCodeCreds })
+
+	loadClaudeCodeCreds = func() (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken:  "sk-ant-oat01-test-token",
+			RefreshToken: "sk-ant-ort01-test-refresh",
+			Provider:     "anthropic",
+			AuthMethod:   "claude-code",
+		}, nil
+	}
+
+	cfg := config.DefaultConfig()
+	cfg.Agents.Defaults.Model = "test-claude-code"
+	cfg.ModelList = []config.ModelConfig{
+		{
+			ModelName:  "test-claude-code",
+			Model:      "anthropic/claude-sonnet-4-6",
+			AuthMethod: "claude-code",
+		},
+	}
+
+	provider, _, err := CreateProvider(cfg)
+	if err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+
+	if _, ok := provider.(*ClaudeProvider); !ok {
+		t.Fatalf("provider type = %T, want *ClaudeProvider", provider)
+	}
+}
+
 func TestCreateProviderReturnsCodexProviderForOpenAIOAuth(t *testing.T) {
 	// TODO: This test requires openai protocol to support auth_method: "oauth"
 	// which is not yet implemented in the new factory_provider.go

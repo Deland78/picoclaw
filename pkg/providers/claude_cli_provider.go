@@ -30,10 +30,17 @@ func (p *ClaudeCliProvider) Chat(
 	systemPrompt := p.buildSystemPrompt(messages, tools)
 	prompt := p.messagesToPrompt(messages)
 
-	args := []string{"-p", "--output-format", "json", "--dangerously-skip-permissions", "--no-chrome"}
+	// Build the full stdin content. The system prompt is embedded into stdin
+	// rather than passed as --system-prompt to avoid hitting Windows' ~32K
+	// command-line length limit when tool definitions are large.
+	var stdinContent string
 	if systemPrompt != "" {
-		args = append(args, "--system-prompt", systemPrompt)
+		stdinContent = "[System Instructions]\n" + systemPrompt + "\n[End System Instructions]\n\n" + prompt
+	} else {
+		stdinContent = prompt
 	}
+
+	args := []string{"-p", "--output-format", "json", "--dangerously-skip-permissions", "--no-chrome"}
 	if model != "" && model != "claude-code" {
 		args = append(args, "--model", model)
 	}
@@ -43,7 +50,7 @@ func (p *ClaudeCliProvider) Chat(
 	if p.workspace != "" {
 		cmd.Dir = p.workspace
 	}
-	cmd.Stdin = bytes.NewReader([]byte(prompt))
+	cmd.Stdin = bytes.NewReader([]byte(stdinContent))
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

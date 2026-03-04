@@ -1,0 +1,38 @@
+version: 1
+
+global:
+  overnight_mode: read_only
+  overnight_hours:
+    - "00:00-06:00"
+
+  actions:
+    read:
+      - jira_open
+      - jira_search
+      - jira_capture
+      - ado_open
+      - ado_search
+      - ado_capture
+      - mail_list_unread
+      - mail_get_thread
+
+    write_requires_approval:
+      - jira_add_comment        # V3 — not implemented yet, policy is ready
+      - jira_transition          # V3
+      - ado_update_field         # V3
+      - mail_move
+      - mail_draft_reply
+
+    blocked:
+      - mail_send               # permanently blocked until V3
+      - mail_delete             # permanently blocked
+
+  approval:
+    token_ttl_minutes: 30
+    auto_approve_reads: true
+
+clients:
+  clientA:
+    actions:
+      write_auto_approved:
+        - mail_move             # clientA allows mail_move without approval prompt

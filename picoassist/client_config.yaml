@@ -1,0 +1,50 @@
+version: 1
+
+paths:
+  profiles_root: "./profiles"       # overridden by PROFILES_ROOT env var (must be absolute)
+  runs_root: "./data/runs"
+  traces_root: "./data/traces"
+
+defaults:
+  browser:
+    slow_mo_ms: 50
+    navigation_timeout_ms: 45000
+    action_timeout_ms: 30000
+
+  # v1 safety settings (replaces policy.yaml — will be split out in v2)
+  safety:
+    mode: read_only                  # v1 is always read_only; v2 adds "interactive" mode
+    overnight_read_only: true        # overnight runs can only navigate + screenshot + extract text
+    allowed_hours:
+      interactive: ["06:00-23:00"]
+      overnight: ["00:00-06:00"]
+
+mail:
+  provider: "microsoft_graph"
+  folders:
+    quarantine: "Quarantine"
+    action_required: "ActionRequired"
+    archive: "Archive"
+
+clients:
+  - id: "clientA"
+    display_name: "Client A"
+    notes: "Replace with your client details"
+    jira:
+      base_url: "https://clientA.atlassian.net"
+      digest:
+        ui_urls:
+          - name: "My issues"
+            url: "https://clientA.atlassian.net/issues/?jql=assignee%20%3D%20currentUser()%20AND%20statusCategory%20!%3D%20Done"
+    ado:
+      org_url: "https://dev.azure.com/clientAOrg"
+      project: "ClientAProject"
+      team: "ClientATeam"
+      digest:
+        ui_urls:
+          - name: "Boards"
+            url: "https://dev.azure.com/clientAOrg/ClientAProject/_boards/board/t/ClientATeam/Backlog%20items"
+          - name: "Queries"
+            url: "https://dev.azure.com/clientAOrg/ClientAProject/_queries"
+    reporting:
+      output_subdir: "clientA"

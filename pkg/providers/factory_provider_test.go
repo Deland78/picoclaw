@@ -8,6 +8,7 @@ package providers
 import (
 	"testing"
 
+	"github.com/sipeed/picoclaw/pkg/auth"
 	"github.com/sipeed/picoclaw/pkg/config"
 )
 
@@ -245,5 +246,65 @@ func TestCreateProviderFromConfig_EmptyModel(t *testing.T) {
 	_, _, err := CreateProviderFromConfig(cfg)
 	if err == nil {
 		t.Fatal("CreateProviderFromConfig() expected error for empty model")
+	}
+}
+
+func TestCreateProviderFromConfig_AnthropicClaudeCode(t *testing.T) {
+	originalGetCredential := getCredential
+	originalLoadClaudeCodeCreds := loadClaudeCodeCreds
+	t.Cleanup(func() {
+		getCredential = originalGetCredential
+		loadClaudeCodeCreds = originalLoadClaudeCodeCreds
+	})
+
+	loadClaudeCodeCreds = func() (*auth.AuthCredential, error) {
+		return &auth.AuthCredential{
+			AccessToken:  "sk-ant-oat01-test-token",
+			RefreshToken: "sk-ant-ort01-test-refresh",
+			Provider:     "anthropic",
+			AuthMethod:   "claude-code",
+		}, nil
+	}
+
+	cfg := &config.ModelConfig{
+		ModelName:  "test-claude-code",
+		Model:      "anthropic/claude-sonnet-4-6",
+		AuthMethod: "claude-code",
+	}
+
+	provider, modelID, err := CreateProviderFromConfig(cfg)
+	if err != nil {
+		t.Fatalf("CreateProviderFromConfig() error = %v", err)
+	}
+	if provider == nil {
+		t.Fatal("CreateProviderFromConfig() returned nil provider")
+	}
+	if _, ok := provider.(*ClaudeProvider); !ok {
+		t.Fatalf("provider type = %T, want *ClaudeProvider", provider)
+	}
+	if modelID != "claude-sonnet-4-6" {
+		t.Errorf("modelID = %q, want %q", modelID, "claude-sonnet-4-6")
+	}
+}
+
+func TestCreateProviderFromConfig_AnthropicClaudeCodeNoCredentials(t *testing.T) {
+	originalLoadClaudeCodeCreds := loadClaudeCodeCreds
+	t.Cleanup(func() {
+		loadClaudeCodeCreds = originalLoadClaudeCodeCreds
+	})
+
+	loadClaudeCodeCreds = func() (*auth.AuthCredential, error) {
+		return nil, nil // not logged in
+	}
+
+	cfg := &config.ModelConfig{
+		ModelName:  "test-claude-code-no-creds",
+		Model:      "anthropic/claude-sonnet-4-6",
+		AuthMethod: "claude-code",
+	}
+
+	_, _, err := CreateProviderFromConfig(cfg)
+	if err == nil {
+		t.Fatal("CreateProviderFromConfig() expected error for missing Claude Code credentials")
 	}
 }

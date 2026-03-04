@@ -11,6 +11,7 @@ import (
 const defaultAnthropicAPIBase = "https://api.anthropic.com/v1"
 
 var getCredential = auth.GetCredential
+var loadClaudeCodeCreds = auth.LoadClaudeCodeCredentials
 
 type providerType int
 

@@ -1191,3 +1191,13 @@ This happens when another instance of the bot is running. Make sure only one `pi
 | **Brave Search** | 2000 queries/month  | Web search functionality              |
 | **Groq**         | Free tier available | Fast inference (Llama, Mixtral)       |
 | **Cerebras**     | Free tier available | Fast inference (Llama, Qwen, etc.)    |
+
+---
+
+## PicoAssist
+
+The `picoassist/` directory contains a Python-based PM assistant that integrates with
+picoclaw via the skill system. It provides email triage (Microsoft 365 / Gmail),
+browser-based Jira/ADO monitoring, and daily digest reports.
+
+See [`picoassist/README.md`](picoassist/README.md) for setup and usage.
