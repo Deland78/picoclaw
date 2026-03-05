@@ -17,7 +17,7 @@ Before the step-by-step plan, here is a summary of problems identified and corre
 | 5 | Repetition bug requires model re-pull, not just Ollama update | Old pulls will still exhibit the bug even after updating Ollama | Added explicit `ollama pull` after update |
 | 6 | No rollback / comparison step | If Qwen3.5 underperforms, there is no path back without re-downloading the old model | Added side-by-side validation and rollback note |
 | 7 | Windows Defender / Firewall can block localhost:11434 | Silent API failures that look like PicoClaw bugs | Added firewall check step |
-| 8 | PicoClaw config changes are speculative | Step 4 cannot be precise without the actual config file | Flagged clearly; added config patterns for all common PicoClaw layouts |
+| 8 | PicoClaw config changes are speculative | Step 4 cannot be precise without the actual config file | Fixed: Step 6 now uses exact JSON `model_list` format from the codebase |
 | 9 | No quantization guidance | Default pull may not be optimal for available VRAM/RAM | Added quantization options table |
 | 10 | Vision capability not confirmed working | Multimodal is the headline feature; worth verifying it actually works in your Ollama version | Added dedicated vision test with a real example |
 | 11 | `OLLAMA_NO_CLOUD=1` not mentioned | Privacy/data-sovereignty is a core PicoClaw value; cloud routing should be explicitly disabled | Added environment variable setup |
@@ -66,7 +66,7 @@ nvidia-smi
 
 ## Step 2: Update Ollama
 
-The Qwen3.5 repetition bug (models echoing output) was fixed in Ollama v0.17.1+. You must update **and** re-pull models — an Ollama update alone does not fix already-downloaded model files.
+The Qwen3.5 repetition bug (models echoing output) was fixed in a recent Ollama release. Check the [Ollama releases page](https://github.com/ollama/ollama/releases) for the latest version with the Qwen3.5 repetition fix. You must update **and** re-pull models — an Ollama update alone does not fix already-downloaded model files.
 
 **Download:** https://ollama.com/download/windows
 
@@ -76,7 +76,7 @@ After install, verify version:
 
 ```powershell
 ollama --version
-# Must show 0.17.1 or higher
+# Must be the latest version with the Qwen3.5 repetition fix
 ```
 
 ### Disable Cloud Routing (Privacy / Data Sovereignty)
@@ -91,7 +91,19 @@ By default, Ollama may route certain requests to Ollama Cloud. For PicoClaw's lo
 $env:OLLAMA_NO_CLOUD
 ```
 
-Alternatively, set it in the Ollama tray app: right-click tray icon → Settings → disable cloud models.
+Alternatively, if available in your Ollama version: right-click the tray icon → Settings → disable cloud models. The environment variable approach above is the reliable method across all versions.
+
+---
+
+### Optional: Enable Flash Attention (NVIDIA GPUs)
+
+If you have an NVIDIA GPU with compute capability >= 8.0 (RTX 30xx+), Flash Attention can significantly improve inference speed and help with repetition:
+
+```powershell
+[System.Environment]::SetEnvironmentVariable("OLLAMA_FLASH_ATTENTION", "1", "Machine")
+```
+
+Restart Ollama after setting this.
 
 ---
 
@@ -154,7 +166,7 @@ curl http://localhost:11434/api/chat -d '{\"model\": \"qwen3.5:4b\", \"messages\
 curl http://localhost:11434/v1/chat/completions -H "Content-Type: application/json" -d '{\"model\": \"qwen3.5:4b\", \"messages\": [{\"role\": \"user\", \"content\": \"API test\"}]}'
 ```
 
-Both endpoints should return JSON with the model's response. The OpenAI-compatible endpoint at `/v1` is what most Python frameworks (LangChain, CrewAI, etc.) expect.
+Both endpoints should return JSON with the model's response. **PicoClaw uses the OpenAI-compatible endpoint** (`/v1/chat/completions`) — the native `/api/chat` test above is just to verify Ollama is running.
 
 ---
 
@@ -166,11 +178,16 @@ Qwen3.5 has a built-in reasoning chain ("thinking mode") that is **ON by default
 
 ### Control Thinking Mode
 
+> **⚠️ Important:** Qwen 3.5 has **dropped official support** for the `/think` and `/no_think` soft-switch tags that worked in Qwen 3. Do not use these in prompts or system messages — they will not work reliably.
+
 | Method | When to Use |
 |---|---|
-| Append `/think` to prompt | Complex reasoning tasks: analysis, code generation |
-| Append `/no_think` to prompt | Fast-pass tasks: classification, simple lookups |
-| Set in Modelfile | Force a mode at the model level for PicoClaw |
+| `PARAMETER enable_thinking false` in Modelfile | Disable thinking at the model level for PicoClaw **(recommended — only method that works without code changes)** |
+| Strip `<think>` tags in response handler | Fallback if thinking output leaks through **(requires adding code — see note below)** |
+
+> **⚠️ PicoClaw does not currently pass `enable_thinking` in API requests.** The `openai_compat` provider only forwards `max_tokens` and `temperature`. Using `"enable_thinking": false` in the request body would require modifying `pkg/providers/openai_compat/provider.go`. The Modelfile parameter is the only zero-code-change option.
+>
+> **⚠️ PicoClaw does not currently strip `<think>` tags from responses.** If thinking output leaks through despite the Modelfile setting, `<think>...</think>` blocks will appear in user-facing output. To add stripping as a safety net, a filter would need to be added in `pkg/providers/openai_compat/provider.go` (in `parseResponse`) or in `pkg/agent/loop.go` (after the LLM call).
 
 ### Recommended: Create a PicoClaw-Optimized Modelfile
 
@@ -182,13 +199,18 @@ FROM qwen3.5:4b
 SYSTEM """
 You are a focused, precise assistant operating in an edge computing environment.
 Respond concisely. Use structured output when appropriate.
-/no_think
 """
 
+PARAMETER enable_thinking false
 PARAMETER num_ctx 32768
 PARAMETER temperature 0.3
 PARAMETER repeat_penalty 1.1
+PARAMETER presence_penalty 1.1
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
 ```
+
+> **Repetition troubleshooting:** If repetition persists after re-pulling the model, adjust `presence_penalty` (1.0–1.5) and `repeat_penalty` (1.1–1.3) until output stabilizes.
 
 Then build and register the custom model:
 
@@ -202,62 +224,71 @@ ollama list
 ollama run picoclaw-qwen35 "What is 2+2?"
 ```
 
-Now PicoClaw can call `picoclaw-qwen35` instead of `qwen3.5:4b` — giving you a pre-configured, fast-response version with no thinking overhead by default. Individual skills that need reasoning can still override with `/think` in the prompt.
+Now PicoClaw can call `picoclaw-qwen35` instead of `qwen3.5:4b` — giving you a pre-configured, fast-response version with no thinking overhead by default. Individual skills that need reasoning can override with `"enable_thinking": true` in the API request body.
 
-> **Context window note:** The default Ollama context is often capped at 2048 tokens. The `num_ctx 32768` in the Modelfile sets it to 32K. Qwen3.5 supports up to 262K — but larger context = more RAM usage. Start at 32K and increase if your skills need it.
+> **Context window note:** The default Ollama context is often capped at 2048 tokens. The `num_ctx 32768` in the Modelfile sets it to 32K. Qwen3.5 supports up to 262K — but larger context = more RAM usage.
+
+### RAM Impact of `num_ctx 32768`
+
+| Model | KV cache at 32K context (Q4) | Total RAM needed |
+|---|---|---|
+| `qwen3.5:4b` | ~3–4 GB additional | ~6–7 GB total |
+| `qwen3.5:9b` | ~5–6 GB additional | ~11–12 GB total |
+
+> **Warning:** The 4B model with 32K context and an unquantized KV cache has been reported using **13 GB VRAM**. If you have 16 GB RAM or less, start with `num_ctx 8192` and increase only if needed.
 
 ---
 
 ## Step 6: Update PicoClaw Configuration
 
-> **⚠️ Important:** The exact file locations depend on your PicoClaw project structure. The patterns below cover the most common layouts. Share your config file for precise line-by-line changes.
+PicoClaw uses a JSON config file at `~/.picoclaw/config.json` (on Windows: `C:\Users\<YourUsername>\.picoclaw\config.json`). The Go binary reads a `model_list` array of `ModelConfig` objects, with model names using the `protocol/modelID` prefix format.
 
-### 6a. YAML-based config (most common PicoClaw pattern)
+### 6a. Add Qwen3.5 to model_list
 
-Look for a file named `config.yaml`, `settings.yaml`, or `.picoclaw/config.yaml`:
+Add an entry to the `model_list` array in `~/.picoclaw/config.json`:
 
-```yaml
-# Before
-model: "llama3.2"           # or whatever was previously set
-provider: "ollama"
-base_url: "http://localhost:11434"
-
-# After
-model: "picoclaw-qwen35"    # your custom Modelfile model
-provider: "ollama"
-base_url: "http://localhost:11434"
+```json
+{
+  "model_name": "picoclaw-qwen35",
+  "model": "ollama/picoclaw-qwen35",
+  "api_base": "http://localhost:11434/v1",
+  "api_key": "",
+  "context_window": 32768
+}
 ```
 
-### 6b. Python-based config
+> **Note on `api_key`:** Ollama does not require authentication. The factory only requires that `api_key` and `api_base` aren't both empty — since `api_base` is set, `api_key` should be `""`. Do not set it to `"ollama"` as that would send a pointless `Authorization` header.
 
-```python
-# Before
-LLM_MODEL = "llama3.2"
-OLLAMA_BASE_URL = "http://localhost:11434"
+> **Note:** The `context_window` field lets PicoClaw properly manage prompt truncation rather than relying only on the Ollama Modelfile `num_ctx`. Set this to match your Modelfile setting.
 
-# After
-LLM_MODEL = "picoclaw-qwen35"
-OLLAMA_BASE_URL = "http://localhost:11434"
-# OpenAI-compatible alternative:
-OLLAMA_BASE_URL_V1 = "http://localhost:11434/v1"
+### 6b. Set as default model
+
+In the same `config.json`, set the default agent model. Choose **one** of these two formats — they are alternatives for the same `model` field:
+
+**Simple (no fallback):**
+```json
+"agents": {
+  "defaults": {
+    "model": "picoclaw-qwen35"
+  }
+}
 ```
 
-### 6c. Per-skill model override (if your YAML skills support model frontmatter)
-
-If individual skills specify a model, update each one:
-
-```yaml
-# Before
-model: "llama3.2"
-
-# After (use the custom model for most skills)
-model: "picoclaw-qwen35"
-
-# Or for skills needing heavy reasoning, use the base model with think mode
-model: "qwen3.5:9b"   # if you pulled it
-# Add to the skill prompt:
-# "...your task... /think"
+**With fallback chain (recommended):**
+```json
+"agents": {
+  "defaults": {
+    "model": {
+      "primary": "picoclaw-qwen35",
+      "fallbacks": ["llama3"]
+    }
+  }
+}
 ```
+
+This provides automatic rollback if Qwen3.5 fails.
+
+> **⚠️ Fallback limitation:** The fallback chain uses the same provider instance for all candidates. All fallback models must be available on the same endpoint (e.g., all on the same Ollama instance). Cross-provider fallback (e.g., Ollama → OpenRouter) is not supported without code changes. Make sure any model listed in `fallbacks` also has an entry in `model_list` with the same `api_base`.
 
 ---
 
@@ -265,7 +296,7 @@ model: "qwen3.5:9b"   # if you pulled it
 
 Qwen3.5's native multimodal support is new functionality for PicoClaw. Test it before building any vision-dependent skills.
 
-### Test via API with a local image:
+### Test via Ollama native API with a local image:
 
 ```python
 import base64, requests
@@ -274,20 +305,43 @@ import base64, requests
 with open("test_image.jpg", "rb") as f:
     image_b64 = base64.b64encode(f.read()).decode()
 
+# Ollama native API format (/api/chat) uses "images" array, not OpenAI's "image_url"
 payload = {
     "model": "qwen3.5:4b",
     "messages": [{
         "role": "user",
-        "content": [
-            {"type": "text", "text": "Describe this image in one sentence. /no_think"},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
-        ]
+        "content": "Describe this image in one sentence.",
+        "images": [image_b64]
     }],
     "stream": False
 }
 
 response = requests.post("http://localhost:11434/api/chat", json=payload)
 print(response.json()["message"]["content"])
+```
+
+### Alternative: Test via OpenAI-compatible endpoint:
+
+```python
+import base64, requests
+
+with open("test_image.jpg", "rb") as f:
+    image_b64 = base64.b64encode(f.read()).decode()
+
+# OpenAI-compatible format (/v1/chat/completions) uses "image_url" with data URI
+payload = {
+    "model": "qwen3.5:4b",
+    "messages": [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image in one sentence."},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+        ]
+    }]
+}
+
+response = requests.post("http://localhost:11434/v1/chat/completions", json=payload)
+print(response.json()["choices"][0]["message"]["content"])
 ```
 
 > **Note:** If vision fails (model returns "I cannot see images"), your Ollama version may not yet have full Qwen3.5 multimodal support active. Check https://github.com/ollama/ollama/releases for the latest patch notes. The model weights support vision; Ollama's serving layer must also support it.
@@ -368,4 +422,4 @@ ollama ps
 
 ---
 
-*Plan version: 1.1 | Gap review completed March 3, 2026*
+*Plan version: 1.3 | Updated March 4, 2026 — codebase audit: fixed api_key, clarified enable_thinking/think-tag limitations, fallback chain constraints, endpoint usage*

@@ -39,8 +39,15 @@ func NewProvider(apiKey, apiBase, proxy string) *Provider {
 }
 
 func NewProviderWithMaxTokensField(apiKey, apiBase, proxy, maxTokensField string) *Provider {
+	// Local Ollama on CPU may need longer for cold model loads + prompt eval.
+	timeout := 120 * time.Second
+	lowerBase := strings.ToLower(apiBase)
+	if strings.Contains(lowerBase, "localhost:11434") || strings.Contains(lowerBase, "127.0.0.1:11434") {
+		timeout = 300 * time.Second
+	}
+
 	client := &http.Client{
-		Timeout: 120 * time.Second,
+		Timeout: timeout,
 	}
 
 	if proxy != "" {
@@ -119,6 +126,20 @@ func (p *Provider) Chat(
 		requestBody["prompt_cache_key"] = cacheKey
 	}
 
+	// For Ollama, use the native /api/chat endpoint with think=false to disable
+	// costly reasoning output. The /v1 OpenAI-compatible endpoint ignores this param.
+	if p.isOllama() {
+		// Replace stripped messages with raw ones — sanitizeOllamaMessages
+		// does its own conversion and implicitly drops SystemParts.
+		requestBody["messages"] = messages
+		return p.ollamaChat(ctx, requestBody)
+	}
+
+	return p.v1Chat(ctx, requestBody)
+}
+
+// v1Chat sends a request via the standard OpenAI-compatible /v1/chat/completions endpoint.
+func (p *Provider) v1Chat(ctx context.Context, requestBody map[string]any) (*LLMResponse, error) {
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
@@ -262,6 +283,157 @@ func stripSystemParts(messages []Message) []openaiMessage {
 		}
 	}
 	return out
+}
+
+// isOllama returns true if the provider's API base points to a local Ollama instance.
+func (p *Provider) isOllama() bool {
+	lower := strings.ToLower(p.apiBase)
+	return strings.Contains(lower, "localhost:11434") || strings.Contains(lower, "127.0.0.1:11434")
+}
+
+// ollamaChat sends a chat request via Ollama's native /api/chat endpoint, which
+// supports "think": false to disable reasoning output. The /v1 OpenAI-compatible
+// endpoint does not support this parameter.
+func (p *Provider) ollamaChat(ctx context.Context, requestBody map[string]any) (*LLMResponse, error) {
+	// Derive the native API base from the /v1 base URL
+	nativeBase := strings.TrimSuffix(p.apiBase, "/v1")
+	nativeBase = strings.TrimSuffix(nativeBase, "/v1/")
+
+	// Sanitize messages so Ollama's native parser doesn't choke on JSON-like
+	// content in tool result messages (it tries to parse them as objects).
+	sanitizeOllamaMessages(requestBody)
+
+	requestBody["think"] = false
+	requestBody["stream"] = false
+
+	jsonData, err := json.Marshal(requestBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal ollama request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", nativeBase+"/api/chat", bytes.NewReader(jsonData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ollama request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send ollama request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ollama response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("ollama API request failed:\n  Status: %d\n  Body:   %s", resp.StatusCode, string(body))
+	}
+
+	return parseOllamaResponse(body)
+}
+
+// sanitizeOllamaMessages converts messages from OpenAI format to Ollama's
+// native /api/chat format. Key differences:
+//   - Tool call arguments must be a JSON object, not a JSON string.
+//   - Tool result content that looks like JSON can confuse the parser.
+func sanitizeOllamaMessages(requestBody map[string]any) {
+	msgs, ok := requestBody["messages"].([]Message)
+	if !ok {
+		return
+	}
+
+	// Convert to []map[string]any for full control over JSON structure.
+	sanitized := make([]map[string]any, len(msgs))
+	for i, msg := range msgs {
+		m := map[string]any{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+
+		// Tool call arguments: OpenAI uses a JSON string, Ollama needs an object.
+		if len(msg.ToolCalls) > 0 {
+			calls := make([]map[string]any, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				// Resolve arguments: prefer the already-parsed map, else parse the string.
+				args := tc.Arguments
+				if len(args) == 0 && tc.Function != nil && tc.Function.Arguments != "" {
+					var parsed map[string]any
+					if json.Unmarshal([]byte(tc.Function.Arguments), &parsed) == nil {
+						args = parsed
+					}
+				}
+
+				name := tc.Name
+				if name == "" && tc.Function != nil {
+					name = tc.Function.Name
+				}
+
+				calls = append(calls, map[string]any{
+					"function": map[string]any{
+						"name":      name,
+						"arguments": args,
+					},
+				})
+			}
+			m["tool_calls"] = calls
+		}
+
+		sanitized[i] = m
+	}
+
+	requestBody["messages"] = sanitized
+}
+
+// parseOllamaResponse parses the native Ollama /api/chat response format.
+func parseOllamaResponse(body []byte) (*LLMResponse, error) {
+	var ollamaResp struct {
+		Message struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Function *struct {
+					Name      string         `json:"name"`
+					Arguments map[string]any `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"message"`
+		DoneReason      string `json:"done_reason"`
+		PromptEvalCount int    `json:"prompt_eval_count"`
+		EvalCount       int    `json:"eval_count"`
+	}
+
+	if err := json.Unmarshal(body, &ollamaResp); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ollama response: %w", err)
+	}
+
+	toolCalls := make([]ToolCall, 0)
+	for _, tc := range ollamaResp.Message.ToolCalls {
+		if tc.Function != nil {
+			toolCalls = append(toolCalls, ToolCall{
+				Name:      tc.Function.Name,
+				Arguments: tc.Function.Arguments,
+			})
+		}
+	}
+
+	finishReason := "stop"
+	if ollamaResp.DoneReason != "" {
+		finishReason = ollamaResp.DoneReason
+	}
+
+	return &LLMResponse{
+		Content:      ollamaResp.Message.Content,
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
+		Usage: &UsageInfo{
+			PromptTokens:     ollamaResp.PromptEvalCount,
+			CompletionTokens: ollamaResp.EvalCount,
+			TotalTokens:      ollamaResp.PromptEvalCount + ollamaResp.EvalCount,
+		},
+	}, nil
 }
 
 func normalizeModel(model, apiBase string) string {
