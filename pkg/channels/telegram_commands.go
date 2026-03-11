@@ -15,11 +15,18 @@ type TelegramCommander interface {
 	Start(ctx context.Context, message telego.Message) error
 	Show(ctx context.Context, message telego.Message) error
 	List(ctx context.Context, message telego.Message) error
+	Digest(ctx context.Context, message telego.Message) error
+}
+
+// DigestSender is implemented by TelegramChannel to deliver LinkedIn digests.
+type DigestSender interface {
+	SendLinkedInDigest(ctx context.Context, chatID int64) error
 }
 
 type cmd struct {
 	bot    *telego.Bot
 	config *config.Config
+	digest DigestSender
 }
 
 func NewTelegramCommands(bot *telego.Bot, cfg *config.Config) TelegramCommander {
@@ -27,6 +34,11 @@ func NewTelegramCommands(bot *telego.Bot, cfg *config.Config) TelegramCommander 
 		bot:    bot,
 		config: cfg,
 	}
+}
+
+// SetDigestSender wires the DigestSender (TelegramChannel) after construction.
+func (c *cmd) SetDigestSender(ds DigestSender) {
+	c.digest = ds
 }
 
 func commandArgs(text string) string {
@@ -40,8 +52,13 @@ func commandArgs(text string) string {
 func (c *cmd) Help(ctx context.Context, message telego.Message) error {
 	msg := `/start - Start the bot
 /help - Show this help message
+/model - Show current model
+/model list - List available models
+/model <name> - Switch to a model
+@model: <msg> - Use a model for one message
 /show [model|channel] - Show current configuration
 /list [models|channels] - List available options
+/digest - Fetch and send LinkedIn digest
 	`
 	_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
 		ChatID: telego.ChatID{ID: message.Chat.ID},
@@ -153,4 +170,28 @@ func (c *cmd) List(ctx context.Context, message telego.Message) error {
 		},
 	})
 	return err
+}
+
+func (c *cmd) Digest(ctx context.Context, message telego.Message) error {
+	if c.digest == nil {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   "LinkedIn digest not available.",
+		})
+		return err
+	}
+
+	_, _ = c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID: telego.ChatID{ID: message.Chat.ID},
+		Text:   "Fetching LinkedIn digest...",
+	})
+
+	if err := c.digest.SendLinkedInDigest(ctx, message.Chat.ID); err != nil {
+		_, _ = c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: message.Chat.ID},
+			Text:   fmt.Sprintf("Digest failed: %s", err.Error()),
+		})
+		return err
+	}
+	return nil
 }

@@ -265,6 +265,23 @@ func (sm *SessionManager) loadSessions() error {
 	return nil
 }
 
+// ClearSession resets a session's messages and summary to empty.
+// Returns false if the session doesn't exist (nothing to clear).
+func (sm *SessionManager) ClearSession(key string) bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, ok := sm.sessions[key]
+	if !ok {
+		return false
+	}
+
+	session.Messages = []providers.Message{}
+	session.Summary = ""
+	session.Updated = time.Now()
+	return true
+}
+
 // SetHistory updates the messages of a session.
 func (sm *SessionManager) SetHistory(key string, history []providers.Message) {
 	sm.mu.Lock()

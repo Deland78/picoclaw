@@ -11,6 +11,7 @@ from .auth_google import GoogleAuth
 from .models import (
     DraftReplyResponse,
     EmailSummary,
+    ListMessagesResponse,
     ListUnreadResponse,
     MoveResponse,
     ThreadMessage,
@@ -76,6 +77,54 @@ class GmailClient:
         new_label = create_resp.json()
         logger.info("Auto-created Gmail label: %s (id=%s)", folder_name, new_label["id"])
         return new_label["id"]
+
+    async def list_messages(
+        self, folder: str = "Inbox", query: str | None = None, max_results: int = 25
+    ) -> ListMessagesResponse:
+        """List messages in a Gmail label/folder (all messages, not just unread)."""
+        headers = await self._headers()
+        label_id = _FOLDER_TO_LABEL.get(folder, folder)
+
+        params: dict[str, str | int] = {
+            "labelIds": label_id,
+            "maxResults": max_results,
+        }
+        if query:
+            params["q"] = query
+
+        resp = await self._http.get(
+            "/users/me/messages",
+            headers=headers,
+            params=params,
+        )
+        resp.raise_for_status()
+        message_ids = [m["id"] for m in resp.json().get("messages", [])]
+
+        emails: list[EmailSummary] = []
+        for msg_id in message_ids:
+            msg_resp = await self._http.get(
+                f"/users/me/messages/{msg_id}",
+                headers=headers,
+                params={"format": "metadata", "metadataHeaders": ["From", "Subject"]},
+            )
+            msg_resp.raise_for_status()
+            msg = msg_resp.json()
+
+            hdrs = msg.get("payload", {}).get("headers", [])
+            internal_date_ms = int(msg.get("internalDate", "0"))
+            received_at = datetime.fromtimestamp(internal_date_ms / 1000, tz=UTC)
+
+            emails.append(
+                EmailSummary(
+                    message_id=msg["id"],
+                    subject=_header_value(hdrs, "Subject") or "(no subject)",
+                    sender=_header_value(hdrs, "From") or "unknown",
+                    received_at=received_at,
+                    preview=msg.get("snippet", "")[:200],
+                )
+            )
+
+        return ListMessagesResponse(emails=emails, count=len(emails))
 
     async def list_unread(self, folder: str = "Inbox", max_results: int = 25) -> ListUnreadResponse:
         """List unread messages in a Gmail label/folder."""

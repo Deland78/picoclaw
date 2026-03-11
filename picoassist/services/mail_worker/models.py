@@ -25,6 +25,20 @@ class ListUnreadResponse(BaseModel):
     count: int
 
 
+# --- list_messages ---
+
+
+class ListMessagesRequest(BaseModel):
+    folder: str = "Inbox"
+    query: str | None = None  # optional Gmail/Graph search string
+    max_results: int = Field(default=25, le=100)
+
+
+class ListMessagesResponse(BaseModel):
+    emails: list[EmailSummary]
+    count: int
+
+
 # --- get_thread_summary ---
 
 

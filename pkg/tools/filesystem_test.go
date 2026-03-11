@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -363,6 +364,9 @@ func TestFilesystemTool_WriteFile_Restricted_CreateDir(t *testing.T) {
 
 // TestHostRW_Read_PermissionDenied verifies that hostRW.Read surfaces access denied errors.
 func TestHostRW_Read_PermissionDenied(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("NTFS does not support Unix file permissions")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("skipping permission test: running as root")
 	}

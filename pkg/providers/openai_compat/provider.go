@@ -306,33 +306,62 @@ func (p *Provider) ollamaChat(ctx context.Context, requestBody map[string]any) (
 	requestBody["think"] = false
 	requestBody["stream"] = false
 
+	// Log request details for diagnostics.
+	model, _ := requestBody["model"].(string)
+	msgCount := 0
+	if msgs, ok := requestBody["messages"]; ok {
+		switch m := msgs.(type) {
+		case []Message:
+			msgCount = len(m)
+		case []map[string]any:
+			msgCount = len(m)
+		}
+	}
+
 	jsonData, err := json.Marshal(requestBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal ollama request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", nativeBase+"/api/chat", bytes.NewReader(jsonData))
+	endpoint := nativeBase + "/api/chat"
+	log.Printf("[ollama] POST %s model=%s messages=%d body_bytes=%d", endpoint, model, msgCount, len(jsonData))
+	start := time.Now()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ollama request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(req)
+	elapsed := time.Since(start)
 	if err != nil {
+		log.Printf("[ollama] FAILED model=%s elapsed=%s error=%v", model, elapsed.Round(time.Millisecond), err)
 		return nil, fmt.Errorf("failed to send ollama request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		log.Printf("[ollama] READ FAILED model=%s status=%d elapsed=%s error=%v", model, resp.StatusCode, elapsed.Round(time.Millisecond), err)
 		return nil, fmt.Errorf("failed to read ollama response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("[ollama] HTTP %d model=%s elapsed=%s body=%s", resp.StatusCode, model, elapsed.Round(time.Millisecond), truncateLog(string(body), 500))
 		return nil, fmt.Errorf("ollama API request failed:\n  Status: %d\n  Body:   %s", resp.StatusCode, string(body))
 	}
 
+	log.Printf("[ollama] OK model=%s elapsed=%s response_bytes=%d", model, elapsed.Round(time.Millisecond), len(body))
 	return parseOllamaResponse(body)
+}
+
+// truncateLog truncates s to maxLen characters, appending "..." if truncated.
+func truncateLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // sanitizeOllamaMessages converts messages from OpenAI format to Ollama's

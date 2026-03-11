@@ -67,12 +67,27 @@ func (t *UsageTracker) Prune() {
 	t.entries = t.entries[:n]
 }
 
+// LastExchange returns the prompt and completion tokens from the most recent entry.
+func (t *UsageTracker) LastExchange() (prompt, completion int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.entries) == 0 {
+		return 0, 0
+	}
+	e := t.entries[len(t.entries)-1]
+	return e.prompt, e.completion
+}
+
 // FormatStatusLine returns a dim status string like:
-// claude-sonnet-4.6 | 1h: 12.5k tokens | 24h: 45.2k tokens
-func (t *UsageTracker) FormatStatusLine(model string) string {
+// claude-sonnet-4.6 | last: 00:07 4.5k+0.2k | 1h: 12.5k tokens | 24h: 45.2k tokens
+func (t *UsageTracker) FormatStatusLine(model string, elapsed time.Duration) string {
+	lastP, lastC := t.LastExchange()
 	_, _, h1 := t.Since(1 * time.Hour)
 	_, _, h24 := t.Since(24 * time.Hour)
-	return fmt.Sprintf("%s | 1h: %s tokens | 24h: %s tokens", model, fmtTokens(h1), fmtTokens(h24))
+	mins := int(elapsed.Minutes())
+	secs := int(elapsed.Seconds()) % 60
+	return fmt.Sprintf("%s | last: %02d:%02d %s+%s | 1h: %s tokens | 24h: %s tokens",
+		model, mins, secs, fmtTokens(lastP), fmtTokens(lastC), fmtTokens(h1), fmtTokens(h24))
 }
 
 func fmtTokens(n int) string {

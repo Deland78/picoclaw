@@ -1,7 +1,9 @@
 package channels
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -74,16 +76,22 @@ func NewTelegramChannel(cfg *config.Config, bus *bus.MessageBus) (*TelegramChann
 
 	base := NewBaseChannel("telegram", telegramCfg, bus, telegramCfg.AllowFrom)
 
-	return &TelegramChannel{
+	cmds := NewTelegramCommands(bot, cfg)
+	ch := &TelegramChannel{
 		BaseChannel:  base,
-		commands:     NewTelegramCommands(bot, cfg),
+		commands:     cmds,
 		bot:          bot,
 		config:       cfg,
 		chatIDs:      make(map[string]int64),
 		transcriber:  nil,
 		placeholders: sync.Map{},
 		stopThinking: sync.Map{},
-	}, nil
+	}
+	// Wire digest sender so /digest command can call SendLinkedInDigest
+	if setter, ok := cmds.(*cmd); ok {
+		setter.SetDigestSender(ch)
+	}
+	return ch, nil
 }
 
 func (c *TelegramChannel) SetTranscriber(transcriber *voice.GroqTranscriber) {
@@ -120,6 +128,20 @@ func (c *TelegramChannel) Start(ctx context.Context) error {
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.commands.List(ctx, message)
 	}, th.CommandEqual("list"))
+
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.commands.Digest(ctx, message)
+	}, th.CommandEqual("digest"))
+
+	// /model routes to the default message handler so the agent loop's
+	// handleCommand picks it up and handles /model show/list/switch.
+	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
+		return c.handleMessage(ctx, &message)
+	}, th.CommandEqual("model"))
+
+	bh.HandleCallbackQuery(func(ctx *th.Context, query telego.CallbackQuery) error {
+		return c.handleCallbackQuery(ctx, query)
+	}, th.AnyCallbackQuery())
 
 	bh.HandleMessage(func(ctx *th.Context, message telego.Message) error {
 		return c.handleMessage(ctx, &message)
@@ -373,6 +395,183 @@ func (c *TelegramChannel) handleMessage(ctx context.Context, message *telego.Mes
 
 	c.HandleMessage(fmt.Sprintf("%d", user.ID), fmt.Sprintf("%d", chatID), content, mediaPaths, metadata)
 	return nil
+}
+
+func (c *TelegramChannel) handleCallbackQuery(ctx context.Context, query telego.CallbackQuery) error {
+	data := query.Data
+	var postID, signal string
+
+	switch {
+	case strings.HasPrefix(data, "li_up:"):
+		postID = strings.TrimPrefix(data, "li_up:")
+		signal = "thumbs_up"
+	case strings.HasPrefix(data, "li_down:"):
+		postID = strings.TrimPrefix(data, "li_down:")
+		signal = "thumbs_down"
+	default:
+		// Not a LinkedIn callback — pass through to agent as a message
+		if query.Message != nil {
+			chatID := query.Message.GetChat().ID
+			userID := fmt.Sprintf("%d", query.From.ID)
+			c.HandleMessage(userID, fmt.Sprintf("%d", chatID), data, nil, nil)
+		}
+		return nil
+	}
+
+	// Call linkedin_worker feedback endpoint
+	payload, _ := json.Marshal(map[string]string{"post_id": postID, "signal": signal})
+	workerURL := linkedInWorkerURL()
+	resp, err := http.Post(
+		workerURL+"/linkedin/feedback",
+		"application/json",
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		logger.WarnCF("telegram", "LinkedIn feedback call failed", map[string]any{
+			"error": err.Error(),
+		})
+	} else {
+		resp.Body.Close()
+	}
+
+	// Acknowledge the callback to remove Telegram's loading spinner
+	ackText := "Recorded!"
+	if signal == "thumbs_up" {
+		ackText = "Liked! Added to your preferences."
+	} else {
+		ackText = "Noted. Will show less like this."
+	}
+	_ = c.bot.AnswerCallbackQuery(ctx, &telego.AnswerCallbackQueryParams{
+		CallbackQueryID: query.ID,
+		Text:            ackText,
+	})
+
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// LinkedIn digest delivery
+// ---------------------------------------------------------------------------
+
+type linkedInPost struct {
+	PostID          string  `json:"post_id"`
+	Author          string  `json:"author"`
+	Content         string  `json:"content"`
+	PostURL         string  `json:"post_url"`
+	FirstCommentURL string  `json:"first_comment_url"`
+	Summary         string  `json:"summary"`
+	RankScore       float64 `json:"rank_score"`
+}
+
+type digestResponse struct {
+	Posts        []linkedInPost `json:"posts"`
+	ScrapedCount int            `json:"scraped_count"`
+	RankedCount  int            `json:"ranked_count"`
+}
+
+func linkedInWorkerURL() string {
+	if u := os.Getenv("LINKEDIN_WORKER_URL"); u != "" {
+		return u
+	}
+	return "http://localhost:8003"
+}
+
+// SendLinkedInDigest calls the LinkedIn worker API and delivers the ranked
+// posts to the given Telegram chat with inline thumbs-up/down buttons.
+func (c *TelegramChannel) SendLinkedInDigest(ctx context.Context, chatID int64) error {
+	workerURL := linkedInWorkerURL()
+	body := bytes.NewReader([]byte(`{"max_posts":20}`))
+	resp, err := http.Post(workerURL+"/linkedin/digest", "application/json", body)
+	if err != nil {
+		return fmt.Errorf("linkedin worker call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("linkedin worker returned status %d", resp.StatusCode)
+	}
+
+	var result digestResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("failed to decode digest response: %w", err)
+	}
+
+	if len(result.Posts) == 0 {
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID: telego.ChatID{ID: chatID},
+			Text:   "No LinkedIn posts found.",
+		})
+		return err
+	}
+
+	// Header
+	header := fmt.Sprintf(
+		"<b>LinkedIn Digest</b> \u2014 %d posts ranked for you (scraped %d)",
+		len(result.Posts), result.ScrapedCount,
+	)
+	_, _ = c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID:    telego.ChatID{ID: chatID},
+		Text:      header,
+		ParseMode: telego.ModeHTML,
+	})
+
+	// Each post with inline keyboard
+	for i, post := range result.Posts {
+		text := fmt.Sprintf(
+			"<b>%d. %s</b>\n%s\n<a href=\"%s\">Open post</a>",
+			i+1,
+			escapeHTML(post.Author),
+			escapeHTML(post.Summary),
+			escapeHTMLAttr(post.PostURL),
+		)
+		if post.FirstCommentURL != "" {
+			text += fmt.Sprintf(
+				" | <a href=\"%s\">First comment link</a>",
+				escapeHTMLAttr(post.FirstCommentURL),
+			)
+		}
+
+		keyboard := &telego.InlineKeyboardMarkup{
+			InlineKeyboard: [][]telego.InlineKeyboardButton{
+				{
+					{Text: "\U0001F44D", CallbackData: "li_up:" + post.PostID},
+					{Text: "\U0001F44E", CallbackData: "li_down:" + post.PostID},
+				},
+			},
+		}
+
+		_, err := c.bot.SendMessage(ctx, &telego.SendMessageParams{
+			ChatID:             telego.ChatID{ID: chatID},
+			Text:               text,
+			ParseMode:          telego.ModeHTML,
+			ReplyMarkup:        keyboard,
+			LinkPreviewOptions: &telego.LinkPreviewOptions{IsDisabled: true},
+		})
+		if err != nil {
+			logger.WarnCF("telegram", "Failed to send digest post", map[string]any{
+				"post_id": post.PostID,
+				"error":   err.Error(),
+			})
+		}
+	}
+
+	// Summary footer
+	footer := fmt.Sprintf(
+		"<i>%d posts reviewed, %d selected</i>",
+		result.ScrapedCount, len(result.Posts),
+	)
+	_, _ = c.bot.SendMessage(ctx, &telego.SendMessageParams{
+		ChatID:    telego.ChatID{ID: chatID},
+		Text:      footer,
+		ParseMode: telego.ModeHTML,
+	})
+
+	return nil
+}
+
+// escapeHTMLAttr escapes & in URLs for use inside HTML href attributes.
+func escapeHTMLAttr(s string) string {
+	return strings.ReplaceAll(s, "&", "&amp;")
 }
 
 func (c *TelegramChannel) downloadPhoto(ctx context.Context, fileID string) string {

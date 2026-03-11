@@ -1,7 +1,4 @@
-// PicoClaw - Self-improvement cron job seeding
-// License: MIT
-
-package main
+package gateway
 
 import (
 	"fmt"

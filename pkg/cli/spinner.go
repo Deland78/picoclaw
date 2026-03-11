@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-var spinnerFrames = []string{"|", "/", "-", "\\"}
-
-// Spinner displays an ASCII spinner on a single line.
+// Spinner displays an elapsed timer on a single line.
 type Spinner struct {
-	w      io.Writer
-	mu     sync.Mutex
-	cancel context.CancelFunc
-	done   chan struct{}
+	w       io.Writer
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	started time.Time
+	elapsed time.Duration
 }
 
 // NewSpinner creates a spinner that writes to w.
@@ -34,6 +34,8 @@ func (s *Spinner) Start(label string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.done = make(chan struct{})
+	s.started = time.Now()
+	s.elapsed = 0
 	go s.run(ctx, label)
 }
 
@@ -49,23 +51,36 @@ func (s *Spinner) Stop() {
 	if cancel != nil {
 		cancel()
 		<-done
+		s.mu.Lock()
+		s.elapsed = time.Since(s.started)
+		s.mu.Unlock()
 	}
+}
+
+// Elapsed returns the duration of the last Start/Stop cycle.
+func (s *Spinner) Elapsed() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.elapsed
 }
 
 func (s *Spinner) run(ctx context.Context, label string) {
 	defer close(s.done)
-	i := 0
-	ticker := time.NewTicker(100 * time.Millisecond)
+	start := time.Now()
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
+	// Show 00:00 immediately
+	fmt.Fprintf(s.w, "\r[00:00] %s", label)
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Fprintf(s.w, "\r\033[K") // clear line
 			return
 		case <-ticker.C:
-			frame := spinnerFrames[i%len(spinnerFrames)]
-			fmt.Fprintf(s.w, "\r%s %s", frame, label)
-			i++
+			elapsed := time.Since(start)
+			mins := int(elapsed.Minutes())
+			secs := int(elapsed.Seconds()) % 60
+			fmt.Fprintf(s.w, "\r[%02d:%02d] %s", mins, secs, label)
 		}
 	}
 }

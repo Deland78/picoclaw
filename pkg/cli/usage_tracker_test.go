@@ -71,6 +71,25 @@ func TestPrune(t *testing.T) {
 	}
 }
 
+func TestLastExchange(t *testing.T) {
+	tr := NewUsageTracker()
+	now := time.Now()
+	tr.nowFunc = func() time.Time { return now }
+
+	p, c := tr.LastExchange()
+	if p != 0 || c != 0 {
+		t.Errorf("LastExchange() on empty tracker = (%d, %d), want (0, 0)", p, c)
+	}
+
+	tr.Record(100, 50, 150)
+	tr.Record(200, 100, 300)
+
+	p, c = tr.LastExchange()
+	if p != 200 || c != 100 {
+		t.Errorf("LastExchange() = (%d, %d), want (200, 100)", p, c)
+	}
+}
+
 func TestFormatStatusLine(t *testing.T) {
 	tr := NewUsageTracker()
 	now := time.Now()
@@ -78,12 +97,13 @@ func TestFormatStatusLine(t *testing.T) {
 
 	tr.Record(5000, 7500, 12500)
 
-	line := tr.FormatStatusLine("claude-sonnet-4.6")
+	line := tr.FormatStatusLine("claude-sonnet-4.6", 7*time.Second)
 	if !strings.Contains(line, "claude-sonnet-4.6") {
 		t.Errorf("status line missing model name: %q", line)
 	}
-	if !strings.Contains(line, "12.5k") {
-		t.Errorf("expected 12.5k in status line: %q", line)
+	// last exchange should show elapsed time and prompt+completion split
+	if !strings.Contains(line, "last: 00:07 5.0k+7.5k") {
+		t.Errorf("expected last: 00:07 5.0k+7.5k in status line: %q", line)
 	}
 	if !strings.Contains(line, "1h:") && !strings.Contains(line, "24h:") {
 		t.Errorf("expected time windows in status line: %q", line)

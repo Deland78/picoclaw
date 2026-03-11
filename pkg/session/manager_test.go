@@ -60,6 +60,50 @@ func TestSave_WithColonInKey(t *testing.T) {
 	}
 }
 
+func TestClearSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	sm := NewSessionManager(tmpDir)
+
+	key := "telegram:999"
+
+	// Clearing a nonexistent session returns false.
+	if sm.ClearSession(key) {
+		t.Fatal("ClearSession on nonexistent session should return false")
+	}
+
+	// Populate session with messages and a summary, then save.
+	sm.GetOrCreate(key)
+	sm.AddMessage(key, "user", "hello")
+	sm.AddMessage(key, "assistant", "hi there")
+	sm.SetSummary(key, "greeting exchange")
+	if err := sm.Save(key); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Clear should return true and reset messages + summary.
+	if !sm.ClearSession(key) {
+		t.Fatal("ClearSession should return true for existing session")
+	}
+	if msgs := sm.GetHistory(key); len(msgs) != 0 {
+		t.Errorf("expected 0 messages after clear, got %d", len(msgs))
+	}
+	if s := sm.GetSummary(key); s != "" {
+		t.Errorf("expected empty summary after clear, got %q", s)
+	}
+
+	// Save and reload to verify persistence.
+	if err := sm.Save(key); err != nil {
+		t.Fatalf("Save after clear failed: %v", err)
+	}
+	sm2 := NewSessionManager(tmpDir)
+	if msgs := sm2.GetHistory(key); len(msgs) != 0 {
+		t.Errorf("expected 0 messages after reload, got %d", len(msgs))
+	}
+	if s := sm2.GetSummary(key); s != "" {
+		t.Errorf("expected empty summary after reload, got %q", s)
+	}
+}
+
 func TestSave_RejectsPathTraversal(t *testing.T) {
 	tmpDir := t.TempDir()
 	sm := NewSessionManager(tmpDir)

@@ -11,10 +11,59 @@ import (
 )
 
 func TestGetConfigPath(t *testing.T) {
+	t.Setenv("PICOCLAW_CONFIG", "")
+	t.Setenv("PICOCLAW_HOME", "")
 	t.Setenv("HOME", "/tmp/home")
+	t.Setenv("USERPROFILE", "/tmp/home")
 
 	got := GetConfigPath()
 	want := filepath.Join("/tmp/home", ".picoclaw", "config.json")
+
+	assert.Equal(t, want, got)
+}
+
+func TestGetPicoclawHome_Default(t *testing.T) {
+	t.Setenv("PICOCLAW_HOME", "")
+	t.Setenv("HOME", "/tmp/home")
+	t.Setenv("USERPROFILE", "/tmp/home")
+
+	got := GetPicoclawHome()
+	want := filepath.Join("/tmp/home", ".picoclaw")
+
+	assert.Equal(t, want, got)
+}
+
+func TestGetPicoclawHome_EnvOverride(t *testing.T) {
+	t.Setenv("PICOCLAW_HOME", "/custom/picoclaw")
+	t.Setenv("HOME", "/tmp/home")
+	t.Setenv("USERPROFILE", "/tmp/home")
+
+	got := GetPicoclawHome()
+	want := "/custom/picoclaw"
+
+	assert.Equal(t, want, got)
+}
+
+func TestGetConfigPath_WithPICOCLAW_HOME(t *testing.T) {
+	t.Setenv("PICOCLAW_CONFIG", "")
+	t.Setenv("PICOCLAW_HOME", "/custom/picoclaw")
+	t.Setenv("HOME", "/tmp/home")
+	t.Setenv("USERPROFILE", "/tmp/home")
+
+	got := GetConfigPath()
+	want := filepath.Join("/custom/picoclaw", "config.json")
+
+	assert.Equal(t, want, got)
+}
+
+func TestGetConfigPath_PICOCLAW_CONFIG_TakesPrecedence(t *testing.T) {
+	t.Setenv("PICOCLAW_CONFIG", "/custom/config.json")
+	t.Setenv("PICOCLAW_HOME", "/custom/picoclaw")
+	t.Setenv("HOME", "/tmp/home")
+	t.Setenv("USERPROFILE", "/tmp/home")
+
+	got := GetConfigPath()
+	want := "/custom/config.json"
 
 	assert.Equal(t, want, got)
 }

@@ -82,6 +82,32 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 	return nil
 }
 
+// promptSessionResume checks for existing session history and asks the user
+// whether to continue or start fresh. Returns true if session was cleared.
+func promptSessionResume(agentLoop *agent.AgentLoop, sessionKey string, reader func() (string, error)) bool {
+	resolvedKey := sessionKey
+	if resolvedKey == "" || resolvedKey == "cli:default" {
+		resolvedKey = agentLoop.GetDefaultSessionKey()
+	}
+	history := agentLoop.GetSessionHistory(resolvedKey)
+	if len(history) == 0 {
+		return false
+	}
+
+	fmt.Printf("Previous session found (%d messages). Continue? [Y/n] ", len(history))
+	line, err := reader()
+	if err != nil {
+		return false
+	}
+	answer := strings.TrimSpace(line)
+	if answer == "n" || answer == "N" {
+		agentLoop.ClearSession(resolvedKey)
+		fmt.Println("Session cleared.")
+		return true
+	}
+	return false
+}
+
 func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
 	prompt := fmt.Sprintf("%s You: ", internal.Logo)
 
@@ -99,6 +125,11 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 		return
 	}
 	defer rl.Close()
+
+	// Check for existing session and prompt user
+	promptSessionResume(agentLoop, sessionKey, func() (string, error) {
+		return rl.Readline()
+	})
 
 	spinner := cli.NewSpinner(rl.Stdout())
 
@@ -123,6 +154,19 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 			return
 		}
 
+		// Intercept "/model" with no args for interactive picker
+		if input == "/model" {
+			cfg := agentLoop.GetConfig()
+			if len(cfg.ModelList) > 0 {
+				selected, ok := showModelPicker(rl, model, cfg.ModelList)
+				if ok && selected != "" {
+					input = "/model " + selected
+				} else {
+					continue
+				}
+			}
+		}
+
 		spinner.Start("Thinking...")
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
@@ -133,13 +177,24 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 			continue
 		}
 
+		// Update model name for status line after successful /model switch
+		if strings.HasPrefix(input, "/model ") && strings.HasPrefix(response, "Switched model") {
+			model = strings.TrimPrefix(input, "/model ")
+		}
+
 		fmt.Fprintf(rl.Stdout(), "\n%s %s\n", internal.Logo, response)
-		fmt.Fprintf(rl.Stdout(), "%s\n\n", tracker.FormatStatusLine(model))
+		fmt.Fprintf(rl.Stdout(), "%s\n\n", tracker.FormatStatusLine(model, spinner.Elapsed()))
 	}
 }
 
 func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
 	reader := bufio.NewReader(os.Stdin)
+
+	// Check for existing session and prompt user
+	promptSessionResume(agentLoop, sessionKey, func() (string, error) {
+		return reader.ReadString('\n')
+	})
+
 	spinner := cli.NewSpinner(os.Stderr)
 
 	for {
@@ -175,6 +230,6 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string,
 		}
 
 		fmt.Printf("\n%s %s\n", internal.Logo, response)
-		fmt.Printf("\033[90m%s\033[0m\n\n", tracker.FormatStatusLine(model))
+		fmt.Printf("\033[90m%s\033[0m\n\n", tracker.FormatStatusLine(model, spinner.Elapsed()))
 	}
 }

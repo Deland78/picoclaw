@@ -10,9 +10,10 @@ description: "Personal PM assistant for email triage, Jira/ADO monitoring, daily
 
 # PicoAssist
 
-PicoAssist is a local HTTP backend running two services:
+PicoAssist is a local HTTP backend running three services:
 - **mail_worker** on `http://localhost:8001` — email triage via Microsoft 365 or Gmail
 - **browser_worker** on `http://localhost:8002` — Jira/ADO capture via persistent Playwright sessions
+- **linkedin_worker** on `http://localhost:8003` — LinkedIn feed scraping, ranking, and Telegram digest delivery
 
 All calls use `exec curl.exe`. Full endpoint details are in `references/api-reference.md`.
 
@@ -87,16 +88,24 @@ If the user names a model not in this list, use your best judgement to construct
 
 ## Prerequisites
 
-Both services must be running. Check health first:
+All services must be running. Check health first:
 
 ```bash
 exec curl -s http://localhost:8001/health
 exec curl -s http://localhost:8002/health
+exec curl -s http://localhost:8003/health
 ```
 
-Expected: `{"status":"ok",...}`. If either fails, tell the user to run `scripts/start_services.ps1`.
+Expected: `{"status":"ok",...}`. If any fail, tell the user to run `scripts/start_services.ps1`.
 
 ## Email operations
+
+### List all messages in a folder
+```bash
+exec write_file C:\Users\david\.picoclaw\workspace\req.json {"folder":"Spam","max_results":50}
+exec curl.exe -s -X POST http://localhost:8001/mail/list_messages -H "Content-Type: application/json" -d @C:\Users\david\.picoclaw\workspace\req.json
+```
+Use `list_messages` to list ALL messages (read and unread) in any folder. Supports an optional `query` field for search filtering (e.g. `{"folder":"Inbox","query":"from:boss@example.com","max_results":10}`).
 
 ### List unread email
 ```bash
@@ -179,12 +188,43 @@ exec python digest_runner.py
 
 Or via the API — list unread for each client, capture Jira/ADO views, summarise.
 
+## LinkedIn feed operations
+
+### Scrape and rank feed
+```bash
+exec write_file C:\Users\david\.picoclaw\workspace\req.json {"max_posts":40}
+exec curl.exe -s -X POST http://localhost:8003/linkedin/scrape_feed -H "Content-Type: application/json" -d @C:\Users\david\.picoclaw\workspace\req.json
+```
+Returns top 20 ranked posts with author, summary, post_url, first_comment_url, rank_score.
+
+### Deliver digest to Telegram
+```bash
+exec write_file C:\Users\david\.picoclaw\workspace\req.json {"max_posts":20}
+exec curl.exe -s -X POST http://localhost:8003/linkedin/digest -H "Content-Type: application/json" -d @C:\Users\david\.picoclaw\workspace\req.json
+```
+Scrapes feed, ranks posts, delivers to Telegram with inline thumbs-up/thumbs-down buttons.
+
+### Record user feedback
+When user taps a thumbs-up/down inline button on Telegram, the callback data is `li_up:{post_id}` or `li_down:{post_id}`. PicoClaw's Telegram channel handles this automatically — it calls the feedback endpoint directly. To record feedback manually:
+```bash
+exec write_file C:\Users\david\.picoclaw\workspace\req.json {"post_id":"POST_ID","signal":"thumbs_up","post_content":"content","post_author":"author"}
+exec curl.exe -s -X POST http://localhost:8003/linkedin/feedback -H "Content-Type: application/json" -d @C:\Users\david\.picoclaw\workspace\req.json
+```
+`signal` must be `"thumbs_up"` or `"thumbs_down"`. Thumbs-up posts are synced to Open Brain.
+
+### View learned preferences
+```bash
+exec curl.exe -s http://localhost:8003/linkedin/preferences
+```
+Shows top positive/negative terms and feedback counts.
+
 ## Safety rules (non-negotiable)
 
 | Action | Policy |
 |--------|--------|
-| `mail_list_unread`, `mail_get_thread` | Always allowed (read) |
+| `mail_list_messages`, `mail_list_unread`, `mail_get_thread` | Always allowed (read) |
 | `jira_*`, `ado_*` | Always allowed (read) |
+| `linkedin_scrape_feed`, `linkedin_digest`, `linkedin_feedback`, `linkedin_preferences` | Always allowed |
 | `mail_move`, `mail_draft_reply` | Require approval (default) |
 | `mail_send`, `mail_delete` | **Permanently blocked** — never attempt |
 

@@ -9,6 +9,7 @@ from .auth_msal import MSALAuth
 from .models import (
     DraftReplyResponse,
     EmailSummary,
+    ListMessagesResponse,
     ListUnreadResponse,
     MoveResponse,
     ThreadMessage,
@@ -31,9 +32,41 @@ class GraphMailClient:
         token = await self._auth.get_token()
         return {"Authorization": f"Bearer {token}"}
 
-    async def list_unread(
-        self, folder: str = "Inbox", max_results: int = 25
-    ) -> ListUnreadResponse:
+    async def list_messages(
+        self, folder: str = "Inbox", query: str | None = None, max_results: int = 25
+    ) -> ListMessagesResponse:
+        """List messages in a mail folder (all messages, not just unread)."""
+        headers = await self._headers()
+        params: dict[str, str | int] = {
+            "$top": max_results,
+            "$select": "id,subject,from,receivedDateTime,bodyPreview",
+            "$orderby": "receivedDateTime desc",
+        }
+        if query:
+            params["$search"] = f'"{query}"'
+
+        resp = await self._http.get(
+            f"/me/mailFolders/{folder}/messages",
+            headers=headers,
+            params=params,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        emails = []
+        for msg in data.get("value", []):
+            emails.append(
+                EmailSummary(
+                    message_id=msg["id"],
+                    subject=msg.get("subject", "(no subject)"),
+                    sender=msg.get("from", {}).get("emailAddress", {}).get("address", "unknown"),
+                    received_at=msg["receivedDateTime"],
+                    preview=msg.get("bodyPreview", "")[:200],
+                )
+            )
+        return ListMessagesResponse(emails=emails, count=len(emails))
+
+    async def list_unread(self, folder: str = "Inbox", max_results: int = 25) -> ListUnreadResponse:
         """List unread messages in a mail folder."""
         headers = await self._headers()
         params = {
@@ -56,9 +89,7 @@ class GraphMailClient:
                 EmailSummary(
                     message_id=msg["id"],
                     subject=msg.get("subject", "(no subject)"),
-                    sender=msg.get("from", {})
-                    .get("emailAddress", {})
-                    .get("address", "unknown"),
+                    sender=msg.get("from", {}).get("emailAddress", {}).get("address", "unknown"),
                     received_at=msg["receivedDateTime"],
                     preview=msg.get("bodyPreview", "")[:200],
                 )
@@ -96,9 +127,7 @@ class GraphMailClient:
         messages = []
         participants = set()
         for msg in conv_data.get("value", []):
-            sender = (
-                msg.get("from", {}).get("emailAddress", {}).get("address", "unknown")
-            )
+            sender = msg.get("from", {}).get("emailAddress", {}).get("address", "unknown")
             participants.add(sender)
             messages.append(
                 ThreadMessage(

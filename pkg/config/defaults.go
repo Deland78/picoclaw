@@ -16,7 +16,9 @@ func DefaultConfig() *Config {
 				Model:               "glm-4.7",
 				MaxTokens:           8192,
 				Temperature:         nil, // nil means use provider default
-				MaxToolIterations:   20,
+				MaxToolIterations:         20,
+				SummarizeMessageThreshold: 20,
+				SummarizeTokenPercent:     75,
 			},
 		},
 		Bindings: []AgentBinding{},

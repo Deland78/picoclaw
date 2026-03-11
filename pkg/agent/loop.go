@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,9 @@ import (
 	"github.com/sipeed/picoclaw/pkg/utils"
 )
 
+// modelTagRe matches a @modelname: prefix at the start of a message.
+var modelTagRe = regexp.MustCompile(`^@([\w][\w-]*):?\s+`)
+
 type AgentLoop struct {
 	bus            *bus.MessageBus
 	cfg            *config.Config
@@ -47,6 +51,11 @@ func (al *AgentLoop) SetUsageCallback(cb func(*providers.UsageInfo)) {
 	al.usageCallback = cb
 }
 
+// GetConfig returns the agent loop's configuration.
+func (al *AgentLoop) GetConfig() *config.Config {
+	return al.cfg
+}
+
 // processOptions configures how a message is processed
 type processOptions struct {
 	SessionKey      string // Session identifier for history/context
@@ -57,6 +66,8 @@ type processOptions struct {
 	EnableSummary   bool   // Whether to trigger summarization
 	SendResponse    bool   // Whether to send response via bus
 	NoHistory       bool   // If true, don't load session history (for heartbeat)
+	ModelOverride   string             // One-time model override (from @model: prefix)
+	ModelOverrideCfg *config.ModelConfig // Full config for the override model (for provider creation)
 }
 
 func NewAgentLoop(cfg *config.Config, msgBus *bus.MessageBus, provider providers.LLMProvider) *AgentLoop {
@@ -241,6 +252,34 @@ func (al *AgentLoop) RecordLastChatID(chatID string) error {
 	return al.state.SetLastChatID(chatID)
 }
 
+// GetDefaultSessionKey returns the session key used for the default agent's main session.
+func (al *AgentLoop) GetDefaultSessionKey() string {
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		return ""
+	}
+	return routing.BuildAgentMainSessionKey(agent.ID)
+}
+
+// GetSessionHistory returns the message history for the given session key.
+func (al *AgentLoop) GetSessionHistory(sessionKey string) []providers.Message {
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		return nil
+	}
+	return agent.Sessions.GetHistory(sessionKey)
+}
+
+// ClearSession clears the session history for the given session key.
+func (al *AgentLoop) ClearSession(sessionKey string) {
+	agent := al.registry.GetDefaultAgent()
+	if agent == nil {
+		return
+	}
+	agent.Sessions.ClearSession(sessionKey)
+	_ = agent.Sessions.Save(sessionKey)
+}
+
 func (al *AgentLoop) ProcessDirect(ctx context.Context, content, sessionKey string) (string, error) {
 	return al.ProcessDirectWithChannel(ctx, content, sessionKey, "cli", "direct")
 }
@@ -302,6 +341,25 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		return response, nil
 	}
 
+	// Parse @model: prefix for one-time model override
+	var modelOverride string
+	var modelOverrideCfg *config.ModelConfig
+	userContent := msg.Content
+	if m := modelTagRe.FindStringSubmatch(userContent); m != nil {
+		tagName := m[1]
+		// Validate against config model_list
+		for i, mc := range al.cfg.ModelList {
+			if strings.EqualFold(mc.ModelName, tagName) {
+				modelOverride = mc.Model
+				modelOverrideCfg = &al.cfg.ModelList[i]
+				userContent = strings.TrimSpace(userContent[len(m[0]):])
+				logger.InfoCF("agent", fmt.Sprintf("Model tag @%s resolved to %s", tagName, mc.Model),
+					map[string]any{"model_override": mc.Model})
+				break
+			}
+		}
+	}
+
 	// Route to determine agent and session key
 	route := al.registry.ResolveRoute(routing.RouteInput{
 		Channel:    msg.Channel,
@@ -317,9 +375,9 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		agent = al.registry.GetDefaultAgent()
 	}
 
-	// Use routed session key, but honor pre-set agent-scoped keys (for ProcessDirect/cron)
+	// Use routed session key, but honor pre-set agent-scoped or cron keys (for ProcessDirect/cron)
 	sessionKey := route.SessionKey
-	if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+	if msg.SessionKey != "" && (strings.HasPrefix(msg.SessionKey, "agent:") || strings.HasPrefix(msg.SessionKey, "cron-")) {
 		sessionKey = msg.SessionKey
 	}
 
@@ -334,10 +392,12 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
 		SessionKey:      sessionKey,
 		Channel:         msg.Channel,
 		ChatID:          msg.ChatID,
-		UserMessage:     msg.Content,
+		UserMessage:     userContent,
 		DefaultResponse: "I've completed processing but have no response to give.",
 		EnableSummary:   true,
 		SendResponse:    false,
+		ModelOverride:   modelOverride,
+		ModelOverrideCfg: modelOverrideCfg,
 	})
 }
 
@@ -448,7 +508,13 @@ func (al *AgentLoop) runAgentLoop(ctx context.Context, agent *AgentInstance, opt
 
 	// 6. Save final assistant message to session
 	agent.Sessions.AddMessage(opts.SessionKey, "assistant", finalContent)
-	agent.Sessions.Save(opts.SessionKey)
+
+	// Cron sessions are ephemeral: don't persist to disk, clear after processing
+	if strings.HasPrefix(opts.SessionKey, "cron-") {
+		agent.Sessions.ClearSession(opts.SessionKey)
+	} else {
+		agent.Sessions.Save(opts.SessionKey)
+	}
 
 	// 7. Optional: summarization
 	if opts.EnableSummary {
@@ -521,12 +587,27 @@ func (al *AgentLoop) runLLMIteration(
 				"tools_json":    formatToolsForLog(providerToolDefs),
 			})
 
+		// Determine effective model and provider (one-time override or default)
+		effectiveModel := agent.Model
+		effectiveProvider := agent.Provider
+		if opts.ModelOverride != "" && opts.ModelOverrideCfg != nil {
+			// Create a temporary provider for the override model
+			overrideProvider, overrideModelID, provErr := providers.CreateProviderFromConfig(opts.ModelOverrideCfg)
+			if provErr != nil {
+				return "", iteration, fmt.Errorf("model override provider creation failed: %w", provErr)
+			}
+			effectiveProvider = overrideProvider
+			effectiveModel = overrideModelID
+		} else if opts.ModelOverride != "" {
+			effectiveModel = opts.ModelOverride
+		}
+
 		// Call LLM with fallback chain if candidates are configured.
 		var response *providers.LLMResponse
 		var err error
 
 		callLLM := func() (*providers.LLMResponse, error) {
-			if len(agent.Candidates) > 1 && al.fallback != nil {
+			if opts.ModelOverride == "" && len(agent.Candidates) > 1 && al.fallback != nil {
 				fbResult, fbErr := al.fallback.Execute(ctx, agent.Candidates,
 					func(ctx context.Context, provider, model string) (*providers.LLMResponse, error) {
 						return agent.Provider.Chat(ctx, messages, providerToolDefs, model, map[string]any{
@@ -546,7 +627,7 @@ func (al *AgentLoop) runLLMIteration(
 				}
 				return fbResult.Response, nil
 			}
-			return agent.Provider.Chat(ctx, messages, providerToolDefs, agent.Model, map[string]any{
+			return effectiveProvider.Chat(ctx, messages, providerToolDefs, effectiveModel, map[string]any{
 				"max_tokens":       agent.MaxTokens,
 				"temperature":      agent.Temperature,
 				"prompt_cache_key": agent.ID,
@@ -671,8 +752,18 @@ func (al *AgentLoop) runLLMIteration(
 		// Save assistant message with tool calls to session
 		agent.Sessions.AddFullMessage(opts.SessionKey, assistantMsg)
 
-		// Execute tool calls
-		for _, tc := range normalizedToolCalls {
+		// Execute tool calls in parallel
+		type indexedToolResult struct {
+			index      int
+			toolResult *tools.ToolResult
+			msg        providers.Message
+			toolName   string
+		}
+
+		parallelResults := make([]indexedToolResult, len(normalizedToolCalls))
+		var toolWg sync.WaitGroup
+
+		for i, tc := range normalizedToolCalls {
 			argsJSON, _ := json.Marshal(tc.Arguments)
 			argsPreview := utils.Truncate(string(argsJSON), 200)
 			logger.InfoCF("agent", fmt.Sprintf("Tool call: %s(%s)", tc.Name, argsPreview),
@@ -682,60 +773,66 @@ func (al *AgentLoop) runLLMIteration(
 					"iteration": iteration,
 				})
 
-			// Create async callback for tools that implement AsyncTool
-			// NOTE: Following openclaw's design, async tools do NOT send results directly to users.
-			// Instead, they notify the agent via PublishInbound, and the agent decides
-			// whether to forward the result to the user (in processSystemMessage).
-			asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
-				// Log the async completion but don't send directly to user
-				// The agent will handle user notification via processSystemMessage
-				if !result.Silent && result.ForUser != "" {
-					logger.InfoCF("agent", "Async tool completed, agent will handle notification",
-						map[string]any{
-							"tool":        tc.Name,
-							"content_len": len(result.ForUser),
-						})
+			toolWg.Add(1)
+			go func(idx int, tc providers.ToolCall) {
+				defer toolWg.Done()
+
+				asyncCallback := func(callbackCtx context.Context, result *tools.ToolResult) {
+					if !result.Silent && result.ForUser != "" {
+						logger.InfoCF("agent", "Async tool completed, agent will handle notification",
+							map[string]any{
+								"tool":        tc.Name,
+								"content_len": len(result.ForUser),
+							})
+					}
 				}
-			}
 
-			toolResult := agent.Tools.ExecuteWithContext(
-				ctx,
-				tc.Name,
-				tc.Arguments,
-				opts.Channel,
-				opts.ChatID,
-				asyncCallback,
-			)
+				toolResult := agent.Tools.ExecuteWithContext(
+					ctx,
+					tc.Name,
+					tc.Arguments,
+					opts.Channel,
+					opts.ChatID,
+					asyncCallback,
+				)
 
+				contentForLLM := toolResult.ForLLM
+				if contentForLLM == "" && toolResult.Err != nil {
+					contentForLLM = toolResult.Err.Error()
+				}
+
+				parallelResults[idx] = indexedToolResult{
+					index:      idx,
+					toolResult: toolResult,
+					msg: providers.Message{
+						Role:       "tool",
+						Content:    contentForLLM,
+						ToolCallID: tc.ID,
+					},
+					toolName: tc.Name,
+				}
+			}(i, tc)
+		}
+		toolWg.Wait()
+
+		// Process results in original order
+		for _, r := range parallelResults {
 			// Send ForUser content to user immediately if not Silent
-			if !toolResult.Silent && toolResult.ForUser != "" && opts.SendResponse {
+			if !r.toolResult.Silent && r.toolResult.ForUser != "" && opts.SendResponse {
 				al.bus.PublishOutbound(bus.OutboundMessage{
 					Channel: opts.Channel,
 					ChatID:  opts.ChatID,
-					Content: toolResult.ForUser,
+					Content: r.toolResult.ForUser,
 				})
 				logger.DebugCF("agent", "Sent tool result to user",
 					map[string]any{
-						"tool":        tc.Name,
-						"content_len": len(toolResult.ForUser),
+						"tool":        r.toolName,
+						"content_len": len(r.toolResult.ForUser),
 					})
 			}
 
-			// Determine content for LLM based on tool result
-			contentForLLM := toolResult.ForLLM
-			if contentForLLM == "" && toolResult.Err != nil {
-				contentForLLM = toolResult.Err.Error()
-			}
-
-			toolResultMsg := providers.Message{
-				Role:       "tool",
-				Content:    contentForLLM,
-				ToolCallID: tc.ID,
-			}
-			messages = append(messages, toolResultMsg)
-
-			// Save tool result message to session
-			agent.Sessions.AddFullMessage(opts.SessionKey, toolResultMsg)
+			messages = append(messages, r.msg)
+			agent.Sessions.AddFullMessage(opts.SessionKey, r.msg)
 		}
 	}
 
@@ -766,9 +863,9 @@ func (al *AgentLoop) updateToolContexts(agent *AgentInstance, channel, chatID st
 func (al *AgentLoop) maybeSummarize(agent *AgentInstance, sessionKey, channel, chatID string) {
 	newHistory := agent.Sessions.GetHistory(sessionKey)
 	tokenEstimate := al.estimateTokens(newHistory)
-	threshold := agent.ContextWindow * 75 / 100
+	threshold := agent.ContextWindow * agent.SummarizeTokenPercent / 100
 
-	if len(newHistory) > 20 || tokenEstimate > threshold {
+	if len(newHistory) > agent.SummarizeMessageThreshold || tokenEstimate > threshold {
 		summarizeKey := agent.ID + ":" + sessionKey
 		if _, loading := al.summarizing.LoadOrStore(summarizeKey, true); !loading {
 			go func() {
@@ -1109,20 +1206,12 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 
 	case "/switch":
 		if len(args) < 3 || args[1] != "to" {
-			return "Usage: /switch [model|channel] to <name>", true
+			return "Usage: /switch channel to <name>", true
 		}
 		target := args[0]
 		value := args[2]
 
 		switch target {
-		case "model":
-			defaultAgent := al.registry.GetDefaultAgent()
-			if defaultAgent == nil {
-				return "No default agent configured", true
-			}
-			oldModel := defaultAgent.Model
-			defaultAgent.Model = value
-			return fmt.Sprintf("Switched model from %s to %s", oldModel, value), true
 		case "channel":
 			if al.channelManager == nil {
 				return "Channel manager not initialized", true
@@ -1132,8 +1221,69 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 			}
 			return fmt.Sprintf("Switched target channel to %s", value), true
 		default:
-			return fmt.Sprintf("Unknown switch target: %s", target), true
+			return fmt.Sprintf("Unknown switch target: %s. Use /model to switch models.", target), true
 		}
+
+	case "/model":
+		defaultAgent := al.registry.GetDefaultAgent()
+		if defaultAgent == nil {
+			return "No default agent configured", true
+		}
+
+		if len(args) == 0 {
+			return fmt.Sprintf("Current model: %s", defaultAgent.Model), true
+		}
+
+		if args[0] == "list" {
+			if len(al.cfg.ModelList) == 0 {
+				return "No models configured in model_list", true
+			}
+			var names []string
+			for _, mc := range al.cfg.ModelList {
+				names = append(names, fmt.Sprintf("• %s → %s", mc.ModelName, mc.Model))
+			}
+			return fmt.Sprintf("Available models:\n%s", strings.Join(names, "\n")), true
+		}
+
+		// Switch model by name
+		modelName := args[0]
+		for _, mc := range al.cfg.ModelList {
+			if strings.EqualFold(mc.ModelName, modelName) {
+				oldModel := defaultAgent.Model
+				// Create a new provider for the target model config
+				newProvider, newModelID, err := providers.CreateProviderFromConfig(&mc)
+				if err != nil {
+					return fmt.Sprintf("Failed to create provider for %s: %v", mc.Model, err), true
+				}
+				defaultAgent.Provider = newProvider
+				defaultAgent.Model = newModelID // model ID without protocol prefix, matching initial startup behavior
+				return fmt.Sprintf("Switched model from %s to %s (%s)", oldModel, mc.Model, mc.ModelName), true
+			}
+		}
+		return fmt.Sprintf("Model %q not found. Use /model list to see available models.", modelName), true
+
+	case "/clear":
+		route := al.registry.ResolveRoute(routing.RouteInput{
+			Channel:    msg.Channel,
+			AccountID:  msg.Metadata["account_id"],
+			Peer:       extractPeer(msg),
+			ParentPeer: extractParentPeer(msg),
+			GuildID:    msg.Metadata["guild_id"],
+			TeamID:     msg.Metadata["team_id"],
+		})
+		agent, ok := al.registry.GetAgent(route.AgentID)
+		if !ok {
+			agent = al.registry.GetDefaultAgent()
+		}
+		sessionKey := route.SessionKey
+		if msg.SessionKey != "" && strings.HasPrefix(msg.SessionKey, "agent:") {
+			sessionKey = msg.SessionKey
+		}
+		if agent.Sessions.ClearSession(sessionKey) {
+			_ = agent.Sessions.Save(sessionKey)
+			return "Conversation cleared.", true
+		}
+		return "No conversation history to clear.", true
 	}
 
 	return "", false

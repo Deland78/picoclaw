@@ -25,6 +25,8 @@ from .factory import create_mail_provider
 from .models import (
     DraftReplyRequest,
     DraftReplyResponse,
+    ListMessagesRequest,
+    ListMessagesResponse,
     ListUnreadRequest,
     ListUnreadResponse,
     MoveRequest,
@@ -94,6 +96,17 @@ async def health():
 # ---------------------------------------------------------------------------
 # Mail endpoints (read-only — no policy gate needed)
 # ---------------------------------------------------------------------------
+
+
+@app.post("/mail/list_messages", response_model=ListMessagesResponse)
+async def list_messages(req: ListMessagesRequest):
+    try:
+        client = _get_client()
+        return await client.list_messages(
+            folder=req.folder, query=req.query, max_results=req.max_results
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/mail/list_unread", response_model=ListUnreadResponse)

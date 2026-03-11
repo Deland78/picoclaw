@@ -9,6 +9,34 @@
 
 ---
 
+### POST /mail/list_messages
+Request:
+```json
+{"folder": "Inbox", "query": "from:alice@example.com", "max_results": 25}
+```
+All fields optional. `folder` defaults to `"Inbox"`, `max_results` defaults to 25 (max 100).
+`query` is an optional search string (Gmail search syntax or Graph `$search`).
+
+Unlike `list_unread`, this returns **all** messages (read and unread).
+
+Response:
+```json
+{
+  "emails": [
+    {
+      "message_id": "AAMkAG...",
+      "subject": "Weekly newsletter",
+      "sender": "news@example.com",
+      "received_at": "2026-02-20T09:15:00Z",
+      "preview": "First ~200 chars of body..."
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
 ### POST /mail/list_unread
 Request:
 ```json

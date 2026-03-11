@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
@@ -206,6 +207,29 @@ func TestMessageTool_Description(t *testing.T) {
 	desc := tool.Description()
 	if desc == "" {
 		t.Error("Description should not be empty")
+	}
+}
+
+func TestMessageTool_ConcurrentExecute(t *testing.T) {
+	tool := NewMessageTool()
+	tool.SetContext("ch", "id")
+	tool.SetSendCallback(func(channel, chatID, content string) error {
+		return nil
+	})
+
+	// Run 10 concurrent executes - should not race
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tool.Execute(context.Background(), map[string]any{"content": "msg"})
+		}()
+	}
+	wg.Wait()
+
+	if !tool.HasSentInRound() {
+		t.Error("Expected HasSentInRound() = true after concurrent sends")
 	}
 }
 

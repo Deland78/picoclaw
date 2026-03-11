@@ -4,6 +4,7 @@ from typing import Protocol, runtime_checkable
 
 from .models import (
     DraftReplyResponse,
+    ListMessagesResponse,
     ListUnreadResponse,
     MoveResponse,
     ThreadSummaryResponse,
@@ -13,6 +14,10 @@ from .models import (
 @runtime_checkable
 class MailProvider(Protocol):
     """Protocol that both GraphMailClient and GmailClient satisfy."""
+
+    async def list_messages(
+        self, folder: str = "Inbox", query: str | None = None, max_results: int = 25
+    ) -> ListMessagesResponse: ...
 
     async def list_unread(
         self, folder: str = "Inbox", max_results: int = 25

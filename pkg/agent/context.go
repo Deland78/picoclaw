@@ -15,15 +15,13 @@ import (
 	"github.com/sipeed/picoclaw/pkg/logger"
 	"github.com/sipeed/picoclaw/pkg/providers"
 	"github.com/sipeed/picoclaw/pkg/skills"
-	"github.com/sipeed/picoclaw/pkg/tools"
 )
 
 type ContextBuilder struct {
 	workspace    string
 	skillsLoader *skills.SkillsLoader
 	memory       *MemoryStore
-	tools        *tools.ToolRegistry // Direct reference to tool registry
-	selfImprove  *config.SelfImproveConfig
+	selfImprove *config.SelfImproveConfig
 
 	// Cache for system prompt to avoid rebuilding on every call.
 	// This fixes issue #607: repeated reprocessing of the entire context.
@@ -40,6 +38,9 @@ type ContextBuilder struct {
 }
 
 func getGlobalConfigDir() string {
+	if home := os.Getenv("PICOCLAW_HOME"); home != "" {
+		return home
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -59,11 +60,6 @@ func NewContextBuilder(workspace string) *ContextBuilder {
 		skillsLoader: skills.NewSkillsLoader(workspace, globalSkillsDir, builtinSkillsDir),
 		memory:       NewMemoryStore(workspace),
 	}
-}
-
-// SetToolsRegistry sets the tools registry for dynamic tool summary generation.
-func (cb *ContextBuilder) SetToolsRegistry(registry *tools.ToolRegistry) {
-	cb.tools = registry
 }
 
 
