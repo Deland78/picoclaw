@@ -32,6 +32,15 @@ coverage.html
 
 # OS
 .DS_Store
+*.png
+*.jpeg
+*.jpg
+
+# Browser profiles
+profiles/
+
+# Claude Code
+.claude/
 
 # Ralph workspace
 ralph/
