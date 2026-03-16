@@ -158,6 +158,11 @@ func registerSharedTools(
 		agent.Tools.Register(tools.NewFindSkillsTool(registryMgr, searchCache))
 		agent.Tools.Register(tools.NewInstallSkillTool(registryMgr, agent.Workspace))
 
+		// Outlook digest tool (only when configured)
+		if cfg.Tools.Outlook.DefaultPrompt != "" {
+			agent.Tools.Register(tools.NewOutlookDigestTool(cfg, agent.Workspace))
+		}
+
 		// Spawn tool with allowlist checker (only when subagents are configured)
 		if agent.Subagents != nil && len(agent.Subagents.AllowAgents) > 0 {
 			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, msgBus)

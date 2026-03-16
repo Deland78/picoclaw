@@ -57,6 +57,11 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		tracker.Record(usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 	})
 
+	// Set up tab-status for terminal tab title
+	project := cli.DetectProject(cfg.Agents.Defaults.Workspace)
+	tabStatus := cli.NewTabStatus(project)
+	defer tabStatus.Reset()
+
 	// Print agent startup info (only for interactive mode)
 	startupInfo := agentLoop.GetStartupInfo()
 	logger.InfoCF("agent", "Agent initialized",
@@ -67,17 +72,20 @@ func agentCmd(message, sessionKey, model string, debug bool) error {
 		})
 
 	if message != "" {
+		tabStatus.Running()
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, message, sessionKey)
 		if err != nil {
+			tabStatus.Error()
 			return fmt.Errorf("error processing message: %w", err)
 		}
+		tabStatus.DoneNoCommit()
 		fmt.Printf("\n%s %s\n", internal.Logo, response)
 		return nil
 	}
 
 	fmt.Printf("%s Interactive mode (Ctrl+C to exit)\n\n", internal.Logo)
-	interactiveMode(agentLoop, sessionKey, cfg.Agents.Defaults.ModelName, tracker)
+	interactiveMode(agentLoop, sessionKey, cfg.Agents.Defaults.ModelName, tracker, tabStatus)
 
 	return nil
 }
@@ -108,7 +116,7 @@ func promptSessionResume(agentLoop *agent.AgentLoop, sessionKey string, reader f
 	return false
 }
 
-func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
+func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker, tabStatus *cli.TabStatus) {
 	prompt := fmt.Sprintf("%s You: ", internal.Logo)
 
 	rl, err := readline.NewEx(&readline.Config{
@@ -121,7 +129,7 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 	if err != nil {
 		fmt.Printf("Error initializing readline: %v\n", err)
 		fmt.Println("Falling back to simple input mode...")
-		simpleInteractiveMode(agentLoop, sessionKey, model, tracker)
+		simpleInteractiveMode(agentLoop, sessionKey, model, tracker, tabStatus)
 		return
 	}
 	defer rl.Close()
@@ -132,6 +140,9 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 	})
 
 	spinner := cli.NewSpinner(rl.Stdout())
+	tabStatus.New()
+
+	workDir := agentLoop.GetConfig().WorkspacePath()
 
 	for {
 		line, err := rl.Readline()
@@ -167,14 +178,25 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 			}
 		}
 
+		commitBefore := cli.GitHeadCommit(workDir)
+		tabStatus.Running()
 		spinner.Start("Thinking...")
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
 		spinner.Stop()
 
 		if err != nil {
+			tabStatus.Error()
 			fmt.Printf("Error: %v\n", err)
 			continue
+		}
+
+		// Check if a git commit happened during this turn
+		commitAfter := cli.GitHeadCommit(workDir)
+		if commitAfter != "" && commitAfter != commitBefore {
+			tabStatus.DoneWithCommit()
+		} else {
+			tabStatus.DoneNoCommit()
 		}
 
 		// Update model name for status line after successful /model switch
@@ -187,7 +209,7 @@ func interactiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, track
 	}
 }
 
-func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker) {
+func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string, tracker *cli.UsageTracker, tabStatus *cli.TabStatus) {
 	reader := bufio.NewReader(os.Stdin)
 
 	// Check for existing session and prompt user
@@ -196,6 +218,9 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string,
 	})
 
 	spinner := cli.NewSpinner(os.Stderr)
+	tabStatus.New()
+
+	workDir := agentLoop.GetConfig().WorkspacePath()
 
 	for {
 		fmt.Print(fmt.Sprintf("%s You: ", internal.Logo))
@@ -219,14 +244,24 @@ func simpleInteractiveMode(agentLoop *agent.AgentLoop, sessionKey, model string,
 			return
 		}
 
+		commitBefore := cli.GitHeadCommit(workDir)
+		tabStatus.Running()
 		spinner.Start("Thinking...")
 		ctx := context.Background()
 		response, err := agentLoop.ProcessDirect(ctx, input, sessionKey)
 		spinner.Stop()
 
 		if err != nil {
+			tabStatus.Error()
 			fmt.Printf("Error: %v\n", err)
 			continue
+		}
+
+		commitAfter := cli.GitHeadCommit(workDir)
+		if commitAfter != "" && commitAfter != commitBefore {
+			tabStatus.DoneWithCommit()
+		} else {
+			tabStatus.DoneNoCommit()
 		}
 
 		fmt.Printf("\n%s %s\n", internal.Logo, response)

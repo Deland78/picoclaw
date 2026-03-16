@@ -478,12 +478,18 @@ type SelfImproveConfig struct {
 }
 
 
+type OutlookConfig struct {
+	DefaultPrompt string `json:"default_prompt" env:"PICOCLAW_TOOLS_OUTLOOK_DEFAULT_PROMPT"`
+	ProfileDir    string `json:"profile_dir"    env:"PICOCLAW_TOOLS_OUTLOOK_PROFILE_DIR"`
+}
+
 type ToolsConfig struct {
-	Web    WebToolsConfig    `json:"web"`
-	Cron   CronToolsConfig   `json:"cron"`
-	Exec   ExecConfig        `json:"exec"`
+	Web         WebToolsConfig    `json:"web"`
+	Cron        CronToolsConfig   `json:"cron"`
+	Exec        ExecConfig        `json:"exec"`
 	Skills      SkillsToolsConfig `json:"skills"`
 	SelfImprove SelfImproveConfig `json:"self_improve"`
+	Outlook     OutlookConfig     `json:"outlook"`
 }
 
 type SkillsToolsConfig struct {

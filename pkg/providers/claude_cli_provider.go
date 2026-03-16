@@ -40,7 +40,12 @@ func (p *ClaudeCliProvider) Chat(
 		stdinContent = prompt
 	}
 
-	args := []string{"-p", "--output-format", "json", "--dangerously-skip-permissions", "--no-chrome"}
+	args := []string{
+		"-p", "--output-format", "json",
+		"--dangerously-skip-permissions", "--no-chrome",
+		"--tools", "",
+		"--system-prompt", "You are picoclaw, a standalone AI agent. You are NOT Claude Code. Follow the [System Instructions] in the user input for your identity, rules, and available tools. When using a tool, respond with ONLY the JSON format specified in the instructions.",
+	}
 	if model != "" && model != "claude-code" {
 		args = append(args, "--model", model)
 	}
