@@ -280,11 +280,24 @@ func (cs *CronService) computeNextRun(schedule *CronSchedule, nowMS int64) *int6
 
 func (cs *CronService) recomputeNextRuns() {
 	now := time.Now().UnixMilli()
-	for i := range cs.store.Jobs {
+	for i := len(cs.store.Jobs) - 1; i >= 0; i-- {
 		job := &cs.store.Jobs[i]
-		if job.Enabled {
-			job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
+		if !job.Enabled {
+			continue
 		}
+
+		// Handle past-due one-time jobs that missed their window
+		if job.Schedule.Kind == "at" && job.Schedule.AtMS != nil && *job.Schedule.AtMS <= now {
+			if job.DeleteAfterRun {
+				cs.removeJobUnsafe(job.ID)
+			} else {
+				job.Enabled = false
+				job.State.NextRunAtMS = nil
+			}
+			continue
+		}
+
+		job.State.NextRunAtMS = cs.computeNextRun(&job.Schedule, now)
 	}
 }
 

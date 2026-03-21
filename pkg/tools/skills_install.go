@@ -39,7 +39,7 @@ func (t *InstallSkillTool) Name() string {
 }
 
 func (t *InstallSkillTool) Description() string {
-	return "Install a skill from a registry by slug. Downloads and extracts the skill into the workspace. Use find_skills first to discover available skills."
+	return "Install a skill from a registry by slug. Downloads and extracts the skill into the workspace. Use find_skills first to discover available skills. IMPORTANT: Always call first WITHOUT confirmed to preview what will be installed, then call again WITH confirmed=true only after the user approves."
 }
 
 func (t *InstallSkillTool) Parameters() map[string]any {
@@ -62,17 +62,16 @@ func (t *InstallSkillTool) Parameters() map[string]any {
 				"type":        "boolean",
 				"description": "Force reinstall if skill already exists (default false)",
 			},
+			"confirmed": map[string]any{
+				"type":        "boolean",
+				"description": "Set to true to proceed with installation after previewing. Without this, only a preview is returned.",
+			},
 		},
 		"required": []string{"slug", "registry"},
 	}
 }
 
 func (t *InstallSkillTool) Execute(ctx context.Context, args map[string]any) *ToolResult {
-	// Install lock to prevent concurrent directory operations.
-	// Ideally this should be done at a `slug` level, currently, its at a `workspace` level.
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	// Validate slug
 	slug, _ := args["slug"].(string)
 	if err := utils.ValidateSkillIdentifier(slug); err != nil {
@@ -84,6 +83,39 @@ func (t *InstallSkillTool) Execute(ctx context.Context, args map[string]any) *To
 	if err := utils.ValidateSkillIdentifier(registryName); err != nil {
 		return ErrorResult(fmt.Sprintf("invalid registry %q: error: %s", registryName, err.Error()))
 	}
+
+	confirmed, _ := args["confirmed"].(bool)
+
+	// Preview mode: fetch metadata and return a preview without installing.
+	if !confirmed {
+		registry := t.registryMgr.GetRegistry(registryName)
+		if registry == nil {
+			return ErrorResult(fmt.Sprintf("registry %q not found", registryName))
+		}
+
+		meta, err := registry.GetSkillMeta(ctx, slug)
+		if err != nil {
+			return ErrorResult(fmt.Sprintf("failed to fetch skill metadata: %v", err))
+		}
+
+		preview := fmt.Sprintf("Preview: would install skill %q", slug)
+		if meta.DisplayName != "" {
+			preview += fmt.Sprintf(" (%s)", meta.DisplayName)
+		}
+		preview += fmt.Sprintf(" from %s registry", registryName)
+		if meta.LatestVersion != "" {
+			preview += fmt.Sprintf(", version %s", meta.LatestVersion)
+		}
+		if meta.Summary != "" {
+			preview += fmt.Sprintf("\nDescription: %s", meta.Summary)
+		}
+		preview += "\n\nAsk the user for confirmation, then call install_skill again with confirmed=true to proceed."
+		return SilentResult(preview)
+	}
+
+	// Install lock to prevent concurrent directory operations.
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
 	version, _ := args["version"].(string)
 	force, _ := args["force"].(bool)

@@ -163,6 +163,9 @@ func registerSharedTools(
 			agent.Tools.Register(tools.NewOutlookDigestTool(cfg, agent.Workspace))
 		}
 
+		// Gmail reauthorization tool
+		agent.Tools.Register(tools.NewReauthGmailTool())
+
 		// Spawn tool with allowlist checker (only when subagents are configured)
 		if agent.Subagents != nil && len(agent.Subagents.AllowAgents) > 0 {
 			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace, msgBus)
@@ -839,6 +842,13 @@ func (al *AgentLoop) runLLMIteration(
 			messages = append(messages, r.msg)
 			agent.Sessions.AddFullMessage(opts.SessionKey, r.msg)
 		}
+
+		// Auto-log tool errors to .learnings/
+		for _, r := range parallelResults {
+			if r.toolResult.IsError {
+				LogToolError(agent.Workspace, &al.cfg.Tools.SelfImprove, r.toolName, r.toolResult.ForLLM)
+			}
+		}
 	}
 
 	return finalContent, iteration, nil
@@ -1153,6 +1163,12 @@ func (al *AgentLoop) estimateTokens(messages []providers.Message) int {
 
 func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) (string, bool) {
 	content := strings.TrimSpace(msg.Content)
+
+	// Allow bare "digest" without slash prefix
+	if content == "digest" {
+		content = "/digest"
+	}
+
 	if !strings.HasPrefix(content, "/") {
 		return "", false
 	}
@@ -1166,6 +1182,13 @@ func (al *AgentLoop) handleCommand(ctx context.Context, msg bus.InboundMessage) 
 	args := parts[1:]
 
 	switch cmd {
+	case "/digest":
+		result, err := al.handleDigest(ctx)
+		if err != nil {
+			return fmt.Sprintf("Digest error: %v", err), true
+		}
+		return result, true
+
 	case "/show":
 		if len(args) < 1 {
 			return "Usage: /show [model|channel|agents]", true
