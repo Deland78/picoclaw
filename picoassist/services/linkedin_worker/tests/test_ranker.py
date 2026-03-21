@@ -85,3 +85,10 @@ def test_apply_summaries():
     apply_summaries(posts)
     assert posts[0].summary == "First post content"
     assert posts[1].summary == "Second post content"
+
+
+def test_promoted_post_scores_negatively():
+    """Posts containing 'Promoted' should score negatively when 'promoted' is a neg term."""
+    post = _make_post("Sponsored", "Promoted content about marketing tools for your business")
+    score = score_post(post, ["kubernetes"], ["promoted", "marketing"])
+    assert score < 0

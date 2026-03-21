@@ -58,7 +58,7 @@ class FeedbackResponse(BaseModel):
     success: bool
     post_id: str
     signal: str
-    synced_to_openbrain: bool = False
+    synced_to_hindsight: bool = False
 
 
 # --- /linkedin/preferences ---

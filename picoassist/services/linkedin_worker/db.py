@@ -166,9 +166,13 @@ class LinkedInDB:
             else:
                 neg_counter.update(terms)
 
+        neg_terms = [t for t, _ in neg_counter.most_common(30)]
+        if "promoted" not in neg_terms:
+            neg_terms.insert(0, "promoted")
+
         return (
             [t for t, _ in pos_counter.most_common(30)],
-            [t for t, _ in neg_counter.most_common(30)],
+            neg_terms,
         )
 
     async def get_feedback_counts(self) -> dict[str, int]:

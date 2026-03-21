@@ -1,12 +1,13 @@
 """FastAPI wrapper for linkedin_worker."""
 
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from hindsight_client import Hindsight
 
 from .db import LinkedInDB
 from .models import (
@@ -26,11 +27,12 @@ logger = logging.getLogger(__name__)
 
 _scraper: LinkedInScraper | None = None
 _db: LinkedInDB | None = None
+_hindsight: Hindsight | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scraper, _db
+    global _scraper, _db, _hindsight
 
     db_path = os.environ.get("ACTION_LOG_PATH", "data/picoassist.db")
     _db = LinkedInDB(db_path)
@@ -40,6 +42,14 @@ async def lifespan(app: FastAPI):
     slow_mo = int(os.environ.get("BROWSER_SLOW_MO_MS", "100"))
     _scraper = LinkedInScraper(profiles_root=profiles_root, slow_mo=slow_mo)
     await _scraper.start()
+
+    hindsight_url = os.environ.get("HINDSIGHT_BASE_URL", "http://localhost:8888")
+    _hindsight = Hindsight(base_url=hindsight_url)
+    try:
+        await asyncio.to_thread(_hindsight.create_bank, bank_id="linkedin-digest")
+    except Exception as e:
+        logger.warning("Hindsight unavailable at startup, semantic scoring disabled: %s", e)
+        _hindsight = None
 
     yield
 
@@ -190,7 +200,7 @@ async def scrape_feed(req: ScrapeFeedRequest):
         raw_posts = await scraper.scrape_feed(max_posts=req.max_posts)
         pos_terms, neg_terms = await db.get_preference_terms()
         ranked = await rank_posts_with_semantic(
-            raw_posts, pos_terms, neg_terms, _openbrain_search, top_n=20
+            raw_posts, pos_terms, neg_terms, _hindsight_search, top_n=20
         )
         apply_summaries(ranked)
 
@@ -224,7 +234,7 @@ async def digest(req: DigestRequest):
         raw_posts = await scraper.scrape_feed(max_posts=req.max_posts * 2)
         pos_terms, neg_terms = await db.get_preference_terms()
         ranked = await rank_posts_with_semantic(
-            raw_posts, pos_terms, neg_terms, _openbrain_search, top_n=req.max_posts
+            raw_posts, pos_terms, neg_terms, _hindsight_search, top_n=req.max_posts
         )
         apply_summaries(ranked)
 
@@ -273,13 +283,13 @@ async def record_feedback(req: FeedbackRequest):
 
     synced = False
     if req.signal == "thumbs_up":
-        synced = await _sync_to_openbrain(post_author, post_content)
+        synced = await _sync_to_hindsight(post_author, post_content)
 
     return FeedbackResponse(
         success=True,
         post_id=req.post_id,
         signal=req.signal,
-        synced_to_openbrain=synced,
+        synced_to_hindsight=synced,
     )
 
 
@@ -302,79 +312,41 @@ async def get_preferences():
 
 
 # ---------------------------------------------------------------------------
-# Open Brain sync
+# Hindsight sync
 # ---------------------------------------------------------------------------
 
 
-async def _sync_to_openbrain(author: str, content: str) -> bool:
-    url = os.environ.get("OPENBRAIN_MCP_URL", "")
-    api_key = os.environ.get("OPENBRAIN_API_KEY", "")
-    if not url or not api_key:
-        logger.warning("Open Brain not configured (OPENBRAIN_MCP_URL / OPENBRAIN_API_KEY)")
+async def _sync_to_hindsight(author: str, content: str) -> bool:
+    """Retain a liked post in Hindsight for future semantic scoring."""
+    if _hindsight is None:
+        logger.warning("Hindsight not configured")
         return False
-
-    # Open Brain is an MCP server — call capture_thought via JSON-RPC
-    thought = f"Liked LinkedIn post by {author}: {content[:500]}"
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": {
-            "name": "capture_thought",
-            "arguments": {"text": thought},
-        },
-        "id": 1,
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={"x-brain-key": api_key},
-            )
-            return resp.status_code < 300
+        await asyncio.to_thread(
+            _hindsight.retain,
+            bank_id="linkedin-digest",
+            # 500 chars fits Hindsight's default chunk size
+            content=f"Liked LinkedIn post by {author}: {content[:500]}",
+        )
+        return True
     except Exception as e:
-        logger.warning("Open Brain sync failed: %s", e)
+        logger.warning("Hindsight retain failed: %s", e)
         return False
 
 
-async def _openbrain_search(query: str, limit: int = 3, threshold: float = 0.5) -> int:
-    """Search Open Brain for thoughts similar to query. Returns match count."""
-    url = os.environ.get("OPENBRAIN_MCP_URL", "")
-    api_key = os.environ.get("OPENBRAIN_API_KEY", "")
-    if not url or not api_key:
+async def _hindsight_search(query: str) -> int:
+    """Search Hindsight for memories similar to query. Returns match count."""
+    if _hindsight is None:
         return 0
-
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "params": {
-            "name": "search_thoughts",
-            "arguments": {"query": query, "limit": limit, "threshold": threshold},
-        },
-        "id": 1,
-    }
-
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(
-                url,
-                json=payload,
-                headers={"x-brain-key": api_key},
-            )
-            if resp.status_code >= 300:
-                return 0
-            result = resp.json()
-            # MCP response: result.result.content[0].text
-            text = result.get("result", {}).get("content", [{}])[0].get("text", "")
-            if "No matching thoughts" in text:
-                return 0
-            # Count numbered entries (e.g., "1. [observation] ...")
-            import re
-
-            return len(re.findall(r"^\d+\.\s+\[", text, re.MULTILINE))
+        response = await asyncio.to_thread(
+            _hindsight.recall,
+            bank_id="linkedin-digest",
+            query=query,
+        )
+        return len(response.results)
     except Exception as e:
-        logger.warning("Open Brain search failed: %s", e)
+        logger.warning("Hindsight recall failed: %s", e)
         return 0
 
 

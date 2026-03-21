@@ -1,7 +1,7 @@
-"""Hybrid ranker for LinkedIn posts — keyword frequency + Open Brain semantic scoring.
+"""Hybrid ranker for LinkedIn posts — keyword frequency + Hindsight semantic scoring.
 
 Score = keyword_score + (semantic_matches * SEMANTIC_BOOST)
-When no feedback or Open Brain data exists, all posts score 0.0 and keep scrape order.
+When no feedback or Hindsight data exists, all posts score 0.0 and keep scrape order.
 """
 
 import asyncio
@@ -12,7 +12,7 @@ from .db import tokenize
 from .models import LinkedInPost
 
 _SUMMARY_MAX_CHARS = 280
-_SEMANTIC_BOOST = 5.0  # Points per Open Brain match
+_SEMANTIC_BOOST = 5.0  # Points per Hindsight match
 
 
 def score_post(
@@ -39,9 +39,9 @@ async def rank_posts_with_semantic(
     search_fn,
     top_n: int = 20,
 ) -> list[LinkedInPost]:
-    """Rank posts using keyword scoring + Open Brain semantic similarity.
+    """Rank posts using keyword scoring + Hindsight semantic similarity.
 
-    search_fn: async callable(query: str) -> int (number of matching thoughts)
+    search_fn: async callable(query: str) -> int (number of matching memories)
     """
     # Keyword scores
     for post in posts:

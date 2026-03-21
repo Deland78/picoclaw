@@ -108,4 +108,17 @@ async def test_get_feedback_counts(db):
 async def test_empty_preferences(db):
     pos, neg = await db.get_preference_terms()
     assert pos == []
-    assert neg == []
+    assert neg == ["promoted"]
+
+
+async def test_get_preference_terms_includes_promoted_negative(db):
+    """'promoted' should always appear in negative terms, even with no feedback."""
+    pos, neg = await db.get_preference_terms()
+    assert "promoted" in neg
+
+
+async def test_get_preference_terms_promoted_not_duplicated(db):
+    """If user already downvoted posts containing 'promoted', don't duplicate it."""
+    await db.record_feedback("p1", "thumbs_down", "promoted content spam promoted stuff")
+    pos, neg = await db.get_preference_terms()
+    assert neg.count("promoted") == 1
